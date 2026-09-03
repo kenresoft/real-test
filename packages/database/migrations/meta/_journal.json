@@ -1,0 +1,146 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787740161538,
+      "tag": "0000_abnormal_apocalypse",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787741654012,
+      "tag": "0001_gorgeous_stephen_strange",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787743127046,
+      "tag": "0002_fat_vulture",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787759630670,
+      "tag": "0003_brainy_the_captain",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787762696578,
+      "tag": "0004_hard_venus",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787762721557,
+      "tag": "0005_stiff_fallen_one",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787765846053,
+      "tag": "0006_empty_thor",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787768884176,
+      "tag": "0007_left_beyonder",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1787778999102,
+      "tag": "0008_daily_proudstar",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1787823001312,
+      "tag": "0009_black_psylocke",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1787910543423,
+      "tag": "0010_warm_spiral",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1787912903353,
+      "tag": "0011_rename_owner_role_to_admin",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1787936065387,
+      "tag": "0012_dapper_rumiko_fujikawa",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1787936100000,
+      "tag": "0013_promote_oldest_admin_to_owner",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1787950569070,
+      "tag": "0014_glossy_ultron",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1788245587625,
+      "tag": "0015_quiet_gamora",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1788426600092,
+      "tag": "0016_green_franklin_richards",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1788429298134,
+      "tag": "0017_lovely_shriek",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1788441059598,
+      "tag": "0018_glamorous_leper_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1788444458573,
+      "tag": "0019_warm_stranger",
+      "breakpoints": true
+    }
+  ]
+}
