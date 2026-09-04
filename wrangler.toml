@@ -112,6 +112,8 @@ CORS_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:517
 # apps/api/src/lib/auth-options.ts already forces Secure cookies unconditionally rather than
 # inferring HTTPS from this value, so a first deploy never silently breaks cookie auth over it.
 BETTER_AUTH_URL = "https://kenresoft-cms-api.kenresoft.workers.dev"
+EMAIL_PROVIDER = "resend"
+EMAIL_FROM = "noreply@kenresoft.com"
 # BETTER_AUTH_SECRET is a real secret, not a var — set it in .dev.vars for local dev
 # (see .dev.vars.example) and via `wrangler secret put BETTER_AUTH_SECRET` for deployed envs.
 
