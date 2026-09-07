@@ -1522,3 +1522,223 @@ their match to a wrangler.toml's *preamble* (before the first `[section]`), conf
 by testing against the real files: a naive first-line-starting-with-`name = "` match would have
 been ambiguous against the *different* `name = "..."` fields inside `[[ratelimits]]` blocks
 further down the same file.
+
+**`pnpm run rename-worker`, for changing a Worker's `*.workers.dev` URL after the fact** (2026-09-05,
+direct user question — "is there a script for that?") — done. Cloudflare has no in-place Worker
+rename: changing `wrangler.toml`'s `name` and redeploying creates a *new* Worker at the new URL,
+the old one keeps running unmodified at its old URL, and every cross-reference the old URL was
+stored in needs fixing up by hand otherwise — the API Worker's own URL is baked into the admin
+build (`VITE_API_URL`) and stored in `BETTER_AUTH_URL`; the admin Worker's URL lives in the API's
+`CORS_ORIGINS` and `ADMIN_URL`. `scripts/rename-worker.mjs` (`--target api|admin --name <new>`)
+does the whole sequence: checks the new name isn't already taken by an unrelated Worker (reusing
+`checkWorkerOwnership()` from the fix above — for the admin Worker, which has no bindings to
+verify ownership *by*, it degrades to a plain existence check via an impossible sentinel
+database id, same trick `ensureWorkerNamesAreOurs()` already uses), asks for confirmation before
+doing anything, deploys the new Worker and updates every cross-reference (rebuilding+redeploying
+the admin app for an API rename; updating `CORS_ORIGINS`/`ADMIN_URL` and redeploying the API for
+an admin rename), then asks whether to delete the now-orphaned old Worker. The old admin URL
+`replaceCorsOrigin()` needs to retire is derived from the *new* deploy's own URL suffix
+(Cloudflare's workers.dev subdomain is fixed per account) rather than a second network round
+trip. `ask()`/`confirm()` moved out of `scripts/setup.mjs` into a new `scripts/lib/prompt.mjs`
+so this script didn't need a second, drifting copy.
+
+**Investigated, not a Kenresoft CMS issue: a user's Astro site logging "your custom src/fetch.ts
+does not call the actions()/middleware() handler"** (2026-09-05) — traced to source, not
+guessed: read Astro 7.x's own `astro/dist/core/fetch/vite-plugin.js` (the warning only fires when
+a project has its *own* `src/fetch.ts`, which Astro's `virtual:astro:fetchable` feature resolves
+as a custom low-level fetch handler replacing the default one) and confirmed by actually running
+`examples/astro-site` live — it has never had a `src/fetch.ts` at any point in its git history
+and doesn't trigger the warning. `@kenresoft-cms/astro` is a plain fetch-wrapper client with zero
+Astro integration hooks, so it can't be the source either. Conclusion: the affected user added
+their own `src/fetch.ts` (for reasons outside this project's docs/template) that doesn't forward
+through Astro's public `astro/fetch` API correctly. Documented as a troubleshooting entry in
+`docs/ASTRO.md` (with the correct forwarding pattern, sourced from reading Astro's own default
+handler implementation) in case a future user extending the example hits the same confusion —
+nothing in this repo needed to change.
+
+**Correction to the above**: the first version of that troubleshooting snippet had the export
+shape wrong — `export default async function fetch(request) {...}` (a bare function). Astro
+calls the handler as `fetchHandler.fetch(request)` (confirmed in `astro/dist/core/app/base.js`,
+line ~270), a *method* call, not a direct invocation — so the default export must be an object
+with a `fetch` method, matching the standard Cloudflare Workers module-worker shape
+(`export default { fetch, scheduled?, ... }`) that `@astrojs/cloudflare` bridges to. The
+original wrong shape would have thrown `fetch is not a function` at runtime the moment Astro
+actually tried to invoke it. Caught and reported by the user who'd hit the original warning
+(their own `src/fetch.ts` mistake, not this project's) before anyone copy-pasted the wrong
+snippet from here. Fixed in `docs/ASTRO.md`.
+
+**`globalVariables.list()` added to `@kenresoft-cms/astro`, and Settings.contactEmail/socialLinks
+removed in favor of Global Variables** (2026-09-05, reported while migrating kenresoft.com's own
+Astro site onto this CMS) — done, two related gaps closed together. First, a straightforward
+addition: `GET /api/v1/public/global-variables` existed and worked but had no client wrapper,
+so `integrations/astro/src/index.ts` gained `globalVariables.list()` (mirrors the existing
+entries/media thin-wrapper style — throws `KenresoftApiError` on non-2xx, `{}` never `null` for
+an empty map, since there's no per-key sub-resource to 404 on).
+
+Second, a real architectural decision the report asked for directly: Settings had
+`contactEmail`/`socialLinks` fields that looked purpose-built for public site metadata, but —
+confirmed by grepping every consumer — had zero functional consumers anywhere in the codebase
+and no public route of their own (unlike `corsOrigin`/`featureFlags`/`previewUrl`, which are
+genuinely CMS-internal and gate real behavior). Global Variables already covered this exact use
+case better: public, edge-cached, arbitrary key names instead of a fixed schema, and an existing
+"Site Info" template. Decided in favor of Global Variables as the one home for this kind of data
+and removed the Settings fields entirely, rather than leaving two overlapping mechanisms around
+— which is exactly the duplication the report was written to flag (a real migration project had
+already started hand-copying contact/social info into Global Variables as a stopgap).
+
+Removal used a real migration (`0024_volatile_spiral.sql`), not just a schema change: verified
+live against a real local D1 instance (pre-existing `contact_email` + `social_links` data
+seeded, plus a *pre-existing* `social_twitter` Global Variable to prove the migration doesn't
+clobber it) that the migration correctly copies any non-null `contactEmail` into a
+`contact_email` Global Variable and each `socialLinks` key into `social_<key>`, skipping any key
+that already exists, before dropping both columns. `apps/admin`'s Settings → Social section
+(`SocialSection.tsx`) now explains the move and links to Global Variables instead of duplicating
+the old fields; General lost its Contact Email field (Site name stays — it's the deployment's
+own admin-facing identity, not site content). `docs/ASTRO.md` gained a "Where public site config
+lives" section making this the documented, intended answer going forward, and `CHANGELOG.md`
+flags it as a breaking change with the exact migration behavior spelled out, since an existing
+deployment's admin-entered contact/social data is affected.
+
+**Commerce, Phase 2a: the catalog domain** (2026-09-05, on `feature/commerce-catalog` off
+`develop` — picking the plugin platform's Commerce vertical back up after the Plugin Management
+pass above; the full domain (catalog, cart, checkout/orders, payments) is too large for one pass,
+so this covers only products/variants/categories/images with full admin CRUD and a public
+read-only storefront API — cart, checkout, and Paystack payments are separate future passes, see
+`docs/PLUGINS.md`'s Commerce section) — done. New package `@kenresoft-cms/plugin-ecommerce`
+(`packages/plugin-ecommerce`), the first real vertical plugin built on Phase 1's platform, not
+just a proof-of-concept like `plugin-hello`.
+
+This pass needed two generic platform extensions first, both benefiting any future plugin, not
+just Commerce (`docs/PLUGINS.md` has the full design for each): unauthenticated **public plugin
+routes** (`PluginRegistration.publicRoutes?`, a new smaller `PluginPublicContext` with no
+`user`/`hasRole`/`events`, mounted at `/api/plugins/<id>/public/v1/*` gated by the same live
+`requirePluginEnabled` check as the admin mount plus Core's existing `publicContentRateLimit` —
+never `requireSession`); and grouped admin-nav entries (`PluginNavItem` gained an optional
+`group?: string`, defaulting to `"Plugins"`, so `AppLayout.tsx` renders one `SidebarGroup` per
+distinct value instead of always one shared group — Commerce's three pages register under their
+own `"Commerce"` group rather than piling into Hello's).
+
+Schema (`packages/database/schema/plugins/commerce.ts`, migration `0025_green_rictor.sql`): four
+`plugin_commerce_`-prefixed tables — `categories` (self-referencing hierarchy, `onDelete: 'set
+null'` so deleting a parent orphans children to top-level rather than cascading), `products`,
+`product_variants` (deliberately flat, a free-form `attributes` JSON blob rather than a
+normalized option/value system — the spec explicitly warned against over-engineering this), and
+`product_images` (associates Core's own `media` rows by id, never manages R2 objects
+independently). Money is integer minor units + a currency code column — the first monetary
+convention anywhere in this codebase, established here since nothing preceded it, never floating
+point. One real Drizzle gotcha hit and fixed: the self-referencing FK's `.references()` callback
+must return `AnySQLiteColumn` (from `drizzle-orm/sqlite-core`), not `typeof table.column` — the
+latter creates a circular type reference that silently collapses the whole table's inferred type
+to `any`.
+
+Admin routes (`/api/plugins/commerce/v1/*`, session-gated, `requirePluginRole('editor')` on every
+write) cover categories/products/variants/images CRUD plus a `settings.ts` route
+(`GET`/`PUT` wrapping `PluginContext.config`) — a small, deliberate addition beyond the plugin-sdk
+platform's existing surface, since Hello's own config demo never exposed `config.get()/.set()`
+over HTTP at all and the planned Settings admin page needed somewhere to call. Public routes
+(`/api/plugins/commerce/public/v1/*`) reuse Core's own "draft 404s exactly like nonexistent"
+security convention by hand: `getPublishedProductBySlug` filters at the query layer, not after
+the fact. `apps/admin/src/plugins/commerce/` gained four pages (Products list with status/category
+filters, a two-column Product detail page modeled on `EntryEditorPage.tsx`'s layout with a
+variants table and an images grid, a flat Categories list+dialog page, and a Settings page) plus
+one extraction the plan called for explicitly: the inline media-picker dialog living inside
+`field-input.tsx`'s `MediaField` became a standalone `apps/admin/src/components/
+media-picker-dialog.tsx` so the new product-image picker and the existing content-entry media
+field share one implementation instead of two copies drifting apart.
+
+Verified in full: `pnpm typecheck`/`pnpm lint` clean across every touched package; three new
+`apps/api` test files (`commerce-categories`/`commerce-products`/`commerce-public-catalog`.test.ts,
+26 tests total against real D1 — role gates, category/product CRUD, cross-product variant/image
+404s, public listing/filtering, the draft-vs-nonexistent 404-parity check, and a disabled-plugin
+assertion proving the enablement gate covers the *public* mount too, not just the admin one) plus
+four new `apps/admin` page test files, all passing; the full pre-existing `apps/api` (38 files)
+and `apps/admin` (29 files) suites re-run clean afterward with zero regressions (individually/in
+small batches per this file's own standing Windows/workerd-flakiness practice — several batches
+did hit the documented module-fallback resource-exhaustion flakiness on first attempt, confirmed
+non-code by re-running clean immediately after).
+
+**Commerce, Phase 2b: cart & customer accounts** (2026-09-07, on `feature/commerce-cart-customer`
+off `develop`) — done, after a plan review that sent the original draft back with 11 required
+changes before any code was written: a persistent token table (the draft had password-reset/
+verification flows but nowhere to store their tokens), real CSRF/CORS reasoning, real
+authentication rate limiting, explicit account-enumeration behavior, an atomic cart-merge
+guarantee, explicit cart-stock/guest-cart-security/lifecycle semantics, and a verified (not
+assumed) FK-cascade decision. Every one of those eleven points is addressed explicitly in
+`docs/PLUGINS.md`'s Commerce section rather than folded in silently — see there for the full
+reasoning on each.
+
+Two new generic platform extensions, both used only by Commerce so far but built plugin-agnostic
+on purpose (docs/PLUGINS.md has the full design for each): a `PluginContext.email`/
+`PluginPublicContext.email` capability wrapping Core's existing pluggable email layer (a plugin
+previously had no way to send mail at all — password-reset/verification needed one); and
+`PluginRegistration.publicRateLimits`, letting a plugin declare a tighter rate limit on one
+sub-path of its own public mount without Core's `mount.ts` ever hardcoding a plugin by name — a
+new `COMMERCE_CUSTOMER_AUTH_RATE_LIMITER` binding (10/60s per IP, mirroring `AUTH_RATE_LIMITER`)
+covers Commerce's own `/customer-auth/*`.
+
+Customer identity is deliberately separate from better-auth (CMS staff only) — hand-rolled on
+`@better-auth/utils`'s standalone hashing primitives, never on better-auth's own identity/
+session/database-adapter system. This distinction mattered in practice, not just on paper:
+`plugin-ecommerce` initially depended on the *full* `better-auth` package (matching how
+`apps/api`'s own recovery-codes.ts/password-reset.ts already import `generateRandomString`/
+`constantTimeEqual` from `better-auth/crypto`), and adding that dependency shifted pnpm's shared
+peer-resolution for `zod` across every *other* better-auth consumer in the workspace — including
+`apps/admin`'s own, completely unrelated CMS-staff auth client — from `4.4.3` onto `4.5.4`,
+breaking `apps/admin`'s typecheck (`TS2742`, an inferred type not portably nameable) despite zero
+lines of `apps/admin` code having changed. Root-caused by bisecting with `git stash` against a
+clean baseline (confirmed the error genuinely didn't exist there) and cross-referencing `pnpm why
+zod -r`, not guessed. Switching `plugin-ecommerce` to depend on `@better-auth/utils` directly
+(the actual home of `hashPassword`/`verifyPassword`/`createRandomStringGenerator`, with zero
+dependency beyond `@noble/hashes`) didn't fix it — the real fix was a scoped `pnpm.overrides`
+entry (`"@better-auth/core>zod": "4.4.3"`, `"better-call>zod": "4.4.3"`, `package.json`'s `pnpm`
+key, matching this project's own existing `qs`/`esbuild`/`undici`/`sharp`/`ws` overrides
+precedent) — narrow enough that `examples/astro-site`'s own independent, newer zod resolution
+(needed by Astro 7) and `@cloudflare/vitest-pool-workers`' bundled `miniflare` (which broke
+outright under a first, over-broad *global* `zod` override — confirmed by reproducing the
+`z.ostring is not a function` failure directly, then narrowing the override's scope) were both
+left untouched. `@better-auth/utils` was kept anyway despite not being what fixed this — it's
+still the more honest, minimal dependency for what's actually used.
+
+Schema: six new `plugin_commerce_`-prefixed tables (`customers`, `customer_sessions`,
+`customer_tokens`, `customer_addresses`, `carts`, `cart_items`), one migration
+(`0026_shocking_iron_fist.sql`) — regenerated once after an initial pass left a redundant plain
+index sitting alongside a unique one on `customers.email`, caught by re-reading the generated SQL
+before committing rather than after. `carts.customerId` uses a partial unique index (`WHERE
+customer_id IS NOT NULL`) so a customer has at most one cart while guest carts, which can be
+many, are unconstrained. Cart-item dedup on `(cartId, productId, variantId)` is deliberately
+application logic, not a DB constraint — SQLite doesn't collapse `variantId IS NULL` rows the way
+that would need, the same reasoning `entries-export-import`'s upsert-by-slug already established.
+
+New `packages/plugin-ecommerce` routes: `customer-auth.ts` (register/login/logout/password-reset/
+verify-email, public, unauthenticated by definition), `customer.ts` (profile/password/addresses,
+session-required — gained its own `.use('*', ...)` auth-checking middleware registered *before*
+any `.openapi()` route, after a test caught a real ordering bug: `@hono/zod-openapi`'s per-route
+body validation otherwise ran before a handler-body-only session check ever got a chance to,
+so an unauthenticated request with a malformed body 400'd instead of 401'd — fixed to match every
+other session-gated route's actual behavior, confirmed by probing an existing `requireSession`-
+gated route the same way first rather than assuming), `cart.ts` (guest-cookie-or-customer-session,
+`GET /cart` intentionally creates nothing — a cart is only ever created inside `POST /cart/items`),
+and `admin-customers.ts` (CMS-staff, `requirePluginRole('admin')` — stricter than catalog's
+`editor` floor, since customer PII is closer to this codebase's own webhooks/Users-management
+sensitivity than day-to-day catalog editing).
+
+Tests: six new `apps/api` files, 27 tests total against real D1, split deliberately smaller than
+one-file-per-domain would suggest — `COMMERCE_CUSTOMER_AUTH_RATE_LIMITER`'s bucket persists
+across every `it()` block within one test file (confirmed empirically: a throwaway debug test
+hammering `/register` in a loop showed exactly 10 successes then 429s from the 11th call on,
+cumulative for the whole file), so `commerce-customer-auth.test.ts` (identity: register/login/
+logout, 3 tests) and `commerce-customer-recovery.test.ts` (password-reset/verify-email/disabled,
+3 tests) are separate files, and both create setup customers directly via the repository rather
+than through the rate-limited HTTP endpoint wherever the test isn't actually exercising that
+endpoint. The rate limiter itself is tested as a pure unit test (`plugin-rate-limit.test.ts`,
+mocked `.limit()`) mirroring `auth-rate-limit.test.ts`'s own existing pattern, rather than another
+real-D1 integration test competing for the same budget. `commerce-cart.test.ts` (8 tests) covers
+the atomic merge end-to-end: a guest cart and a pre-existing customer cart each holding 2 of a
+3-stock variant, merged on login, asserted to land on exactly 3 (summed then capped) with the
+guest cart row gone afterward. `commerce-customer-profile.test.ts` (5 tests) and
+`commerce-admin-customers.test.ts` (4 tests) round out addresses/password-change/admin-disable.
+Two new `apps/admin` page test files. Full pre-existing suites re-run clean afterward: all 38
+`apps/api` files (individually/in small batches per the standing Windows/workerd-flakiness
+practice — several again hit the documented module-fallback resource-exhaustion pattern on first
+attempt, confirmed non-code by retrying clean) and all 31 `apps/admin` files (162 tests) in one
+clean run.

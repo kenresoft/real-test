@@ -4,16 +4,21 @@ import type {
   PluginBindings,
   PluginConfigService,
   PluginContext,
+  PluginEmailService,
   PluginLogger,
   PluginMediaService,
+  PluginPublicContext,
+  PluginPublicVariables,
   PluginRegistration,
   PluginVariables,
 } from '@kenresoft-cms/plugin-sdk';
 import type { Database } from '@kenresoft-cms/database';
 import type { MiddlewareHandler } from 'hono';
 
+import { getEmailSender } from '../lib/email';
 import { deleteMediaFile, getMedia, uploadMedia } from '../lib/media-service';
 import { getPluginSettingsRow, upsertPluginConfig } from '../repositories/plugin-settings';
+import type { Bindings } from '../lib/env';
 import { pluginEventBus } from './events';
 
 // Wraps apps/api/src/lib/media-service.ts's exact upload/delete code path — the same one
@@ -71,6 +76,18 @@ function createPluginConfigService(db: Database, plugin: PluginRegistration): Pl
   };
 }
 
+// Wraps apps/api/src/lib/email/*'s existing provider-selection logic exactly (docs/PLUGINS.md) —
+// a plugin never picks a provider or sees its credentials. `c.env` inside a plugin's own context
+// middleware is typed as the narrow PluginBindings ({ DB, MEDIA_BUCKET }), which deliberately
+// omits EMAIL_PROVIDER/EMAIL_FROM/RESEND_API_KEY/EMAIL — this cast is the one place that's
+// bridged back to the real, full env Core's own context.ts legitimately has access to when
+// constructing what it hands to a plugin. The plugin-facing type contract (PluginBindings) never
+// changes; only this internal Core wiring needs the real Bindings shape.
+function createPluginEmailService(env: PluginBindings): PluginEmailService {
+  const sender = getEmailSender(env as unknown as Bindings);
+  return { send: (message) => sender.send(message) };
+}
+
 function createPluginLogger(pluginId: string): PluginLogger {
   const prefix = `[plugin:${pluginId}]`;
   return {
@@ -102,6 +119,28 @@ export function createPluginContextMiddleware(
       media: createPluginMediaService(db, c.env.MEDIA_BUCKET),
       config: createPluginConfigService(db, plugin),
       events: pluginEventBus,
+      email: createPluginEmailService(c.env),
+      logger: createPluginLogger(plugin.manifest.id),
+    };
+    c.set('pluginContext', ctx);
+    await next();
+  };
+}
+
+// The unauthenticated counterpart, for a plugin's optional publicRoutes mount
+// (apps/api/src/plugins/mount.ts) — same media-service/config-service wiring, no user/hasRole/
+// events, since there's no session to scope them to.
+export function createPluginPublicContextMiddleware(
+  plugin: PluginRegistration,
+): MiddlewareHandler<{ Bindings: PluginBindings; Variables: PluginPublicVariables }> {
+  return async (c, next) => {
+    const db = createDb(c.env.DB);
+    const ctx: PluginPublicContext = {
+      pluginId: plugin.manifest.id,
+      db,
+      media: createPluginMediaService(db, c.env.MEDIA_BUCKET),
+      config: createPluginConfigService(db, plugin),
+      email: createPluginEmailService(c.env),
       logger: createPluginLogger(plugin.manifest.id),
     };
     c.set('pluginContext', ctx);

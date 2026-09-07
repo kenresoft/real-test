@@ -64,10 +64,17 @@ work, not a rename of this package (see Future work).
   (5/60s per client IP) and validated against that form's own field definitions — there's no
   client-side equivalent of those definitions to validate against here (no public
   form-metadata endpoint either), so a validation failure only surfaces after a real request.
-- A `KenresoftApiError` thrown for any other non-2xx response from `entries.*`/`media.*`'s
-  underlying fetch, carrying the HTTP status; for `forms.submit`, thrown for *any* non-2xx
-  response (400/404/429 are all meaningful outcomes here, not something to paper over), with
-  `issues` populated for a 400 (the field-level validation errors).
+- `globalVariables.list()` — every global variable as a flat `Record<string, string>`, or `{}`
+  if none exist. Backed by `GET /api/v1/public/global-variables`
+  (`apps/api/src/routes/public/global-variables.ts`), unauthenticated and edge-cached the same
+  way entries/media are — one cache key for the whole map, since (unlike entries/media) there's
+  no per-key sub-resource. The natural home for site-wide config a template needs at render
+  time and an editor manages from Settings → General/Social's fields don't otherwise cover —
+  see "Where public site config lives" below.
+- A `KenresoftApiError` thrown for any other non-2xx response from `entries.*`/`media.*`/
+  `globalVariables.*`'s underlying fetch, carrying the HTTP status; for `forms.submit`, thrown
+  for *any* non-2xx response (400/404/429 are all meaningful outcomes here, not something to
+  paper over), with `issues` populated for a 400 (the field-level validation errors).
 
 This covers the entire public API surface (`docs/ARCHITECTURE.md` §8) — there's nothing else
 public to wrap. The admin API (creating/editing content types, entries, media, users, forms)
@@ -78,6 +85,31 @@ There's deliberately no `contentTypes.list()`/`contentTypes.get()`. The public A
 endpoint for content-type metadata (field definitions, etc.) — only `apps/admin`'s
 authenticated admin API can see that. A content type is only ever addressed by its slug when
 fetching entries, which the client already supports; there was nothing else to wrap.
+
+### Where public site config lives
+
+**Global Variables is the intended home for anything a public frontend needs to render** — a
+contact email, social links, a phone number, a footer copyright line, a promo banner. Settings
+(admin-only, `GET`/`PUT /api/v1/admin/settings`) used to also carry `contactEmail`/`socialLinks`
+fields that looked purpose-built for exactly this, sitting alongside `corsOrigin`/
+`featureFlags`/`previewUrl`, which are genuinely CMS-internal and must stay admin-only. In
+practice those two fields had no route of their own and no functional consumer anywhere in this
+codebase — a half-finished feature, not a real alternative — while Global Variables already had
+everything this needs: a public, unauthenticated, edge-cached route
+(`globalVariables.list()` above), arbitrary key names instead of a fixed schema, and an admin UI
+with a "Site Info" template (Global Variables page → Examples) that creates `contact_email`,
+`social_twitter`, `social_facebook`, `social_instagram`, and similar keys in one step.
+
+Resolved by removing `contactEmail`/`socialLinks` from Settings entirely (migration
+`0024_volatile_spiral.sql`) rather than leaving both mechanisms around to keep duplicating each
+other, which is exactly the confusion that prompted this decision — a real migration project,
+mid-adoption, had already started hand-copying contact/social info into Global Variables as a
+workaround. The migration doesn't just drop the columns: any existing non-null `contactEmail`
+becomes a `contact_email` Global Variable, and each key in `socialLinks` becomes `social_<key>`
+(`social_twitter`, `social_facebook`, etc.) — skipped if a variable with that exact key already
+exists, so it never overwrites something you'd already created yourself. Settings → Social in
+the admin now points at Global Variables instead of duplicating it. `Settings.name` stays where
+it is — it's the deployment's own identity (admin sidebar, browser tab), not site-facing content.
 
 ## How Astro communicates with the CMS
 
@@ -203,6 +235,46 @@ distinct next phase, not a small extension of this one.
   reads as a native-addon/Node-version teardown race (esbuild/sharp), not anything wrong with
   the CMS integration or its output — but if `astro build` ever reports a non-zero exit here,
   check `dist/` before assuming the build actually failed.
+
+### Troubleshooting: "your custom src/fetch.ts does not call the actions()/middleware() handler"
+
+Not a Kenresoft CMS or `@kenresoft-cms/astro` issue — confirmed by reading Astro 7.x's own
+source (`astro/dist/core/fetch/vite-plugin.js`) and by reproducing (or rather, failing to
+reproduce) it against `examples/astro-site` itself, which has never had a `src/fetch.ts` at any
+point in its history and doesn't trigger this warning when actually run. `@kenresoft-cms/astro`
+is a plain fetch-wrapper client with zero Astro integration hooks (no middleware, no actions) and
+can't be the source either.
+
+This is a real Astro 7.x feature (`virtual:astro:fetchable`): it fires only when your **own**
+project has a `src/fetch.ts` (or `.js`/`.mjs`) file — Astro resolves it as a custom low-level
+fetch handler, replacing its own default one, and warns once your project uses Actions or
+middleware if that file doesn't forward through them. If you've added one yourself (most
+Kenresoft-CMS-backed Astro sites don't need to — every page here is a stateless per-request
+fetch from the public API, no Actions or middleware of the CMS's own), either remove it if it's
+not actually needed, or make sure it calls through Astro's public `astro/fetch` API, matching
+the same order Astro's own default handler uses internally:
+
+```ts
+// src/fetch.ts
+import { FetchState, middleware, actions, astro } from 'astro/fetch';
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const state = new FetchState(request);
+    return middleware(state, async (state) => {
+      const actionResponse = await actions(state);
+      return actionResponse ?? astro(state);
+    });
+  },
+};
+```
+
+The default export must be an **object with a `fetch` method** — matching the standard
+Cloudflare Workers module-worker shape (`export default { fetch, scheduled?, ... }`), since
+that's exactly what `@astrojs/cloudflare` bridges to. Astro calls it as
+`fetchHandler.fetch(request)` (confirmed in `astro/dist/core/app/base.js`), not as a bare
+function — a plain `export default async function fetch(request) {...}` throws at runtime
+(`fetch is not a function`) once Astro actually tries to invoke it.
 
 ## Future work
 

@@ -1,12 +1,14 @@
 import type { OpenAPIHono } from '@hono/zod-openapi';
 import { Hono } from 'hono';
-import type { PluginBindings, PluginVariables } from '@kenresoft-cms/plugin-sdk';
+import type { PluginBindings, PluginPublicVariables, PluginVariables } from '@kenresoft-cms/plugin-sdk';
 
+import { publicContentRateLimit } from '../middleware/public-content-rate-limit';
 import { requireSession } from '../middleware/require-session';
 import type { Bindings } from '../lib/env';
 import type { AuthedVariables } from '../middleware/require-session';
-import { createPluginContextMiddleware } from './context';
+import { createPluginContextMiddleware, createPluginPublicContextMiddleware } from './context';
 import { requirePluginEnabled } from './enablement';
+import { createPluginRateLimitMiddleware } from './plugin-rate-limit';
 import { VALIDATED_PLUGINS } from './registry';
 
 // The one composition point index.ts calls — index.ts itself never imports a specific plugin
@@ -35,5 +37,30 @@ export function mountPlugins(app: OpenAPIHono<{ Bindings: Bindings; Variables: A
     pluginApp.route('/', plugin.routes);
 
     app.route(base, pluginApp);
+
+    // Optional unauthenticated, storefront-facing mount (Commerce is the first plugin needing
+    // this) — mirrors Core's own /api/v1/public/* vs /api/v1/admin/* split. Gated by the same
+    // live requirePluginEnabled check as the admin mount (a disabled plugin's storefront API
+    // must 404 too, not just its admin API) plus Core's existing public-content rate limiter,
+    // reused as-is rather than a new binding — but deliberately never requireSession.
+    if (plugin.publicRoutes) {
+      const publicBase = `/api/plugins/${plugin.manifest.id}/public/v1`;
+      app.use(`${publicBase}/*`, requirePluginEnabled(plugin.manifest.id));
+      app.use(`${publicBase}/*`, publicContentRateLimit);
+
+      // Additional, tighter rate limits a plugin declares on specific sub-paths of its own
+      // public mount (PluginRegistration.publicRateLimits, docs/PLUGINS.md) — layered on top of,
+      // not instead of, the generic limiter above. Applied on the same outer app, before the
+      // plugin's own router, for the same reason requirePluginEnabled/publicContentRateLimit are.
+      for (const rule of plugin.publicRateLimits ?? []) {
+        app.use(`${publicBase}${rule.pathPrefix}/*`, createPluginRateLimitMiddleware(rule.bindingName));
+      }
+
+      const publicPluginApp = new Hono<{ Bindings: PluginBindings; Variables: PluginPublicVariables }>();
+      publicPluginApp.use('*', createPluginPublicContextMiddleware(plugin));
+      publicPluginApp.route('/', plugin.publicRoutes);
+
+      app.route(publicBase, publicPluginApp);
+    }
   }
 }
