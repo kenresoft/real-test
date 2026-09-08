@@ -1,12 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { createPluginOpenApiApp } from '@kenresoft-cms/plugin-sdk';
 import type { PluginBindings, PluginPublicContext, PluginPublicVariables } from '@kenresoft-cms/plugin-sdk';
-import type { Context } from 'hono';
 import type { PluginCommerceCart } from '@kenresoft-cms/database';
 
 import type { CommerceConfig } from '../config-schema';
-import { getCustomerFromRequest, getGuestCartId, setGuestCartCookie, clearGuestCartCookie } from '../lib/customer-session';
-import { getCustomerCart, getGuestCart, createGuestCart, getOrCreateCartForCustomer, clearCart } from '../repository/carts';
+import { resolveExistingCart } from '../lib/cart-resolution';
+import { getCustomerFromRequest, setGuestCartCookie, clearGuestCartCookie } from '../lib/customer-session';
+import { requireTrustedOriginForMutations } from '../lib/origin-check';
+import { createGuestCart, getOrCreateCartForCustomer, clearCart } from '../repository/carts';
 import { listItemsWithDetail, addOrIncrementItem, updateItemQuantity, removeItem } from '../repository/cart-items';
 import { getProductById } from '../repository/products';
 import { getVariantById } from '../repository/variants';
@@ -16,6 +17,8 @@ import { getVariantById } from '../repository/variants';
 // docs/PLUGINS.md's guest-cart-security note). GET is side-effect-free by design: a cart is only
 // ever created inside POST /items, the first add-to-cart call, not by reading an empty one.
 export const cartRoutes = createPluginOpenApiApp<{ Bindings: PluginBindings; Variables: PluginPublicVariables }>();
+
+cartRoutes.use('*', requireTrustedOriginForMutations());
 
 const errorSchema = z.object({ error: z.string() });
 
@@ -38,20 +41,6 @@ const cartSchema = z.object({
 });
 
 const emptyCart = { id: null, currency: null, items: [] };
-
-// Resolves the caller's own cart (customer's or guest's) without creating anything — used by
-// every route here except POST /items, which is the one place a cart may be created.
-async function resolveExistingCart(c: Context, ctx: PluginPublicContext): Promise<PluginCommerceCart | null> {
-  const customer = await getCustomerFromRequest(c, ctx.db);
-  if (customer) {
-    const cart = await getCustomerCart(ctx.db, customer.id);
-    return cart ?? null;
-  }
-  const guestCartId = getGuestCartId(c);
-  if (!guestCartId) return null;
-  const cart = await getGuestCart(ctx.db, guestCartId);
-  return cart ?? null;
-}
 
 async function serializeCart(ctx: PluginPublicContext, cart: PluginCommerceCart | null) {
   if (!cart) return emptyCart;
@@ -106,7 +95,8 @@ cartRoutes.openapi(
     responses: {
       200: { description: 'The updated cart.', content: { 'application/json': { schema: cartSchema } } },
       400: {
-        description: 'Unknown product/variant, an unpublished product, or a currency that does not match the cart’s existing currency.',
+        description:
+          'Unknown product/variant, an unpublished product, an archived or out-of-stock variant, or a currency that does not match the cart’s existing currency.',
         content: { 'application/json': { schema: errorSchema } },
       },
     },
@@ -123,6 +113,9 @@ cartRoutes.openapi(
       const variant = await getVariantById(ctx.db, input.variantId);
       if (!variant || variant.productId !== product.id) {
         return c.json({ error: 'No variant with that id belonging to that product' }, 400);
+      }
+      if (variant.status !== 'active') {
+        return c.json({ error: 'This variant is no longer available' }, 400);
       }
     }
 
@@ -143,11 +136,14 @@ cartRoutes.openapi(
       return c.json({ error: `This product is priced in ${product.currency}, but the cart is in ${cart.currency}` }, 400);
     }
 
-    await addOrIncrementItem(ctx.db, cart.id, {
+    const added = await addOrIncrementItem(ctx.db, cart.id, {
       productId: input.productId,
       variantId: input.variantId ?? null,
       quantity: input.quantity,
     });
+    if (added === null) {
+      return c.json({ error: 'This variant is out of stock' }, 400);
+    }
 
     return c.json(await serializeCart(ctx, cart), 200);
   },
