@@ -69,6 +69,7 @@ export interface CommerceProductDetail extends CommerceProduct {
 export interface CommerceSettings {
   storeName: string;
   defaultCurrency: string;
+  siteUrl: string | null;
 }
 
 export interface CommerceProductFilters {

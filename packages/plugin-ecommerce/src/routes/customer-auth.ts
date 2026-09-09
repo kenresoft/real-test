@@ -91,11 +91,17 @@ customerAuthRoutes.openapi(
     await mergeGuestCartIfPresent(c, ctx, customer.id);
 
     const verifyToken = await createCustomerToken(ctx.db, customer.id, 'email_verification');
+    const config = (await ctx.config.get()) as CommerceConfig;
     c.executionCtx.waitUntil(
       ctx.email.send({
         to: customer.email,
         subject: 'Verify your email',
-        text: `Verify your email with this token: ${verifyToken}`,
+        // config.siteUrl is optional (this plugin has no way to know a storefront's own URL on
+        // its own — same reasoning as Core's settings.previewUrl) — when it's unset, fall back to
+        // a plain instruction rather than a bare, unexplained token with nothing to do with it.
+        text: config.siteUrl
+          ? `Verify your email by visiting: ${config.siteUrl}/account/verify-email?token=${verifyToken}`
+          : `Verify your email with this token: ${verifyToken}`,
       }),
     );
 
@@ -179,11 +185,14 @@ customerAuthRoutes.openapi(
     const customer = await getCustomerByEmail(ctx.db, input.email);
     if (customer && !customer.disabled) {
       const token = await createCustomerToken(ctx.db, customer.id, 'password_reset');
+      const config = (await ctx.config.get()) as CommerceConfig;
       c.executionCtx.waitUntil(
         ctx.email.send({
           to: customer.email,
           subject: 'Reset your password',
-          text: `Reset your password with this token: ${token}`,
+          text: config.siteUrl
+            ? `Reset your password by visiting: ${config.siteUrl}/account/reset-password?token=${token}`
+            : `Reset your password with this token: ${token}`,
         }),
       );
     }

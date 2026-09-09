@@ -1,0 +1,84 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Alert from '../../components/ui/Alert.astro';
+
+const token = Astro.url.searchParams.get('token');
+---
+
+<BaseLayout title="Verify your email — Kenresoft CMS" noIndex>
+  <div class="auth-page">
+    <h1>Verify your email</h1>
+
+    {
+      !token ? (
+        <Alert tone="error">
+          This link is missing its verification token. Use the link from your verification email, or
+          <a href="/account/settings">check your account settings</a> once signed in.
+        </Alert>
+      ) : (
+        <>
+          <div id="verify-loading" class="loading-note">Verifying…</div>
+          <Alert tone="error" id="verify-error" hidden />
+          <Alert tone="success" id="verify-success" hidden>
+            Your email is verified.
+          </Alert>
+          <p class="auth-links"><a href="/account">Go to your account</a></p>
+        </>
+      )
+    }
+  </div>
+</BaseLayout>
+
+<script>
+  import { getBrowserClient, KenresoftApiError } from '../../lib/browser-client';
+
+  const token = new URLSearchParams(window.location.search).get('token');
+  const loadingEl = document.getElementById('verify-loading') as HTMLElement | null;
+  const errorEl = document.getElementById('verify-error') as HTMLElement | null;
+  const successEl = document.getElementById('verify-success') as HTMLElement | null;
+
+  if (token && loadingEl && errorEl && successEl) {
+    getBrowserClient()
+      .commerce.customerAuth.verifyEmail({ token })
+      .then(() => {
+        loadingEl.hidden = true;
+        successEl.hidden = false;
+      })
+      .catch((err) => {
+        loadingEl.hidden = true;
+        errorEl.textContent = err instanceof KenresoftApiError ? err.message : 'Could not verify your email.';
+        errorEl.hidden = false;
+      });
+  }
+</script>
+
+<style>
+  .auth-page {
+    max-width: 420px;
+    margin: 0 auto;
+    padding: var(--space-16) var(--space-6) var(--space-20);
+  }
+
+  .auth-page h1 {
+    margin: 0 0 var(--space-8);
+    font-size: var(--text-3xl);
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .auth-links {
+    text-align: center;
+    margin: var(--space-4) 0 0;
+    font-size: var(--text-sm);
+  }
+
+  .auth-links a {
+    color: var(--brand);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .auth-links a:hover {
+    text-decoration: underline;
+  }
+</style>
