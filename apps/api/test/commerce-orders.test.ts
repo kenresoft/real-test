@@ -66,6 +66,15 @@ async function registeredCustomer(email: string) {
   return { customer, cookie: `commerce_customer_session=${rawToken}` };
 }
 
+// Payment settlement is authoritative and lives entirely outside PATCH /orders/{id}/status
+// (repository/orders.ts's VALID_TRANSITIONS deliberately excludes pending -> paid) — tests that
+// need a 'paid' order to exercise paid -> fulfilled/cancelled write it directly, the same way
+// resolvePaymentAttempt itself would (a real Paystack-driven paid transition is covered by
+// commerce-payments.test.ts, not this file).
+async function markOrderPaidDirectly(orderId: string): Promise<void> {
+  await env.DB.prepare("UPDATE plugin_commerce_orders SET status = 'paid' WHERE id = ?").bind(orderId).run();
+}
+
 async function placeOrder(customerCookie: string, productId: string, variantId?: string, quantity = 1) {
   await SELF.fetch(`${CART_BASE}/items`, {
     method: 'POST',
@@ -106,6 +115,39 @@ describe('commerce plugin: order management (real D1)', () => {
     expect(list.status).toBe(401);
   });
 
+  it('admin: rejects paid -> refunded directly (not just fulfilled -> refunded) — no provider-backed refund is issued by this API', async () => {
+    const adminCookie = await freshAdminCookie();
+    const product = await createPublishedProduct(adminCookie);
+    const { cookie: customerCookie } = await registeredCustomer('order-refund-direct@example.test');
+    const order = await placeOrder(customerCookie, product.id);
+    await markOrderPaidDirectly(order.id);
+
+    const toRefunded = await SELF.fetch(`${ADMIN_BASE}/orders/${order.id}/status`, {
+      method: 'PATCH',
+      headers: { Cookie: adminCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'refunded' }),
+    });
+    expect(toRefunded.status).toBe(400);
+  });
+
+  it('admin: cannot mark an order paid by hand — payment settlement (Paystack verify/webhook) is the only authority for pending -> paid (issue 4 of the payments concurrency review)', async () => {
+    const adminCookie = await freshAdminCookie();
+    const product = await createPublishedProduct(adminCookie);
+    const { cookie: customerCookie } = await registeredCustomer('order-no-manual-paid@example.test');
+    const order = await placeOrder(customerCookie, product.id);
+    expect(order.status).toBe('pending');
+
+    const toPaid = await SELF.fetch(`${ADMIN_BASE}/orders/${order.id}/status`, {
+      method: 'PATCH',
+      headers: { Cookie: adminCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'paid' }),
+    });
+    expect(toPaid.status).toBe(400);
+
+    const row = await env.DB.prepare('SELECT status FROM plugin_commerce_orders WHERE id = ?').bind(order.id).first<{ status: string }>();
+    expect(row?.status).toBe('pending');
+  });
+
   it('admin: lists orders, filters by status, gets a detail view with items and address, and transitions status validly/invalidly', async () => {
     const adminCookie = await freshAdminCookie();
     const product = await createPublishedProduct(adminCookie);
@@ -137,14 +179,10 @@ describe('commerce plugin: order management (real D1)', () => {
     });
     expect(badTransition.status).toBe(400);
 
-    // Valid: pending -> paid -> fulfilled.
-    const toPaid = await SELF.fetch(`${ADMIN_BASE}/orders/${order.id}/status`, {
-      method: 'PATCH',
-      headers: { Cookie: adminCookie, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'paid' }),
-    });
-    expect(toPaid.status).toBe(200);
-    expect((await toPaid.json<{ status: string }>()).status).toBe('paid');
+    // paid -> fulfilled is admin-settable; pending -> paid is not (payment settlement is
+    // authoritative — see the dedicated test above), so this test reaches 'paid' the same way a
+    // real payment settlement would: a direct status write, not this PATCH endpoint.
+    await markOrderPaidDirectly(order.id);
 
     const toFulfilled = await SELF.fetch(`${ADMIN_BASE}/orders/${order.id}/status`, {
       method: 'PATCH',
@@ -152,6 +190,16 @@ describe('commerce plugin: order management (real D1)', () => {
       body: JSON.stringify({ status: 'fulfilled' }),
     });
     expect(toFulfilled.status).toBe(200);
+
+    // 'refunded' has no transition reaching it from any status — no real Paystack refund is
+    // ever issued by this API today, so representing an order as financially refunded would be
+    // false. See repository/orders.ts's own comment for the full reasoning.
+    const toRefunded = await SELF.fetch(`${ADMIN_BASE}/orders/${order.id}/status`, {
+      method: 'PATCH',
+      headers: { Cookie: adminCookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'refunded' }),
+    });
+    expect(toRefunded.status).toBe(400);
   });
 
   it('admin: 404s a nonexistent order id', async () => {

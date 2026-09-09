@@ -12,8 +12,8 @@ documented below: unauthenticated public plugin routes, grouped admin-nav entrie
 capability, a generic per-plugin public rate-limit declaration, (2b's hardening follow-up) a
 `PluginBindings.CORS_ORIGINS` field backing a per-plugin explicit Origin/CSRF check, and (2d) a
 `PluginContext.payments`/`PluginPaymentsService` capability wrapping a pluggable payment-provider
-layer. Storefront integration into `@kenresoft-cms/astro`/`examples/astro-site` (2e) remains not
-started.
+layer. Phase 2e (storefront integration into `@kenresoft-cms/astro`/`examples/astro-site`) complete,
+2026-09-08 — see the end of this document.
 
 ## What this is
 
@@ -594,3 +594,277 @@ this environment doesn't have.
 
 Storefront integration into `@kenresoft-cms/astro`/`examples/astro-site` (2e) — wiring the whole
 cart → checkout → pay → verify flow into a real rendered storefront — remains **not started**.
+
+## Commerce (Phase 2d review fixes) — done, 2026-09-08
+
+A direct code review of the merged 2d work (not a fresh phase) found six real gaps, all closed
+before 2e could start:
+
+1. **Paystack status mapping.** `toTransactionStatus` and the routes consuming it originally
+   collapsed every non-`success` status straight to `failed` — but Paystack has genuinely
+   non-terminal statuses (`pending`/`ongoing`/`processing`/`queued`) and a `reversed` status for a
+   charge reversed after the fact. `PaymentTransactionStatus` now carries Paystack's full
+   vocabulary 1:1; `routes/payments.ts`'s verify handler only calls `settlePayment` for the two
+   genuinely terminal outcomes (`success`, `failed`/`abandoned`) and leaves a payment attempt
+   `pending` in the ledger for anything else, logging it as informational rather than guessing.
+2. **Duplicate payment initialization.** A repeated `POST /orders/{id}/initialize` previously
+   called Paystack again every time, creating a new chargeable reference each call. It now checks
+   `getPendingPaymentAttemptForOrder` first and re-verifies that attempt's real status with
+   Paystack: still in flight → reuse the same stored `authorizationUrl` (a new column on
+   `plugin_commerce_order_payments`, set once at initialize time); genuinely failed → resolve it
+   and issue a real fresh reference; already succeeded → reject (the order is no longer pending).
+3. **Stale idempotency-claim recovery.** `claimIdempotencyKey` could leave a key permanently
+   `in_progress` (409 forever) if the Worker crashed after claiming it but before
+   `completeIdempotencyKey` ran. A claim older than `STALE_CLAIM_MS` (30s — generous for an I/O-
+   bound checkout, and a false "still in progress" is harmless where reclaiming too early is not)
+   is now reclaimable via the same conditional-update-plus-check-returned-rows idiom used
+   throughout this codebase: bumping `createdAt` is simultaneously "I now own this key" and the
+   guard against a second concurrent reclaimer also succeeding.
+4. **`refunded` was never real.** The pre-fix `paid`/`fulfilled -> refunded` transition changed
+   the CMS status and restocked inventory without ever calling a Paystack refund API — an order
+   could read "refunded" while no money had moved. No transition reaches `refunded` now (the
+   status value itself stays defined, for a future pass that implements real provider-backed
+   refunds); the admin Order detail page no longer offers it as an option.
+5. **Cancellation-vs-payment race, given an explicit policy.** If an order is cancelled while its
+   Paystack transaction is still pending, and Paystack later reports `charge.success` for it, the
+   order's CMS status must never be silently overwritten — `resolvePaymentAttempt`'s own
+   conditional `UPDATE ... WHERE status = 'pending'` already made this safe at the DB level (the
+   order stays cancelled); `settlePayment` (`routes/payments.ts`) now explicitly detects this case
+   (`orderTransitionedToPaid: false` on an otherwise-successful resolution) and logs it loudly for
+   manual reconciliation, since real money moved for an order this deployment no longer considers
+   open and provider-backed refunds aren't implemented yet (see point 4). The payment is still
+   recorded as a genuine success in the ledger — never silently dropped.
+6. Tests for all of the above: `paystack-provider.test.ts` gained full coverage of Paystack's
+   status vocabulary (was 8 tests, still 8 — the existing status test was extended, not
+   duplicated); `commerce-payments.test.ts` grew from 12 to 22 tests (non-terminal statuses via
+   `it.each`, terminal failures via `it.each`, three duplicate-initialization tests, and the
+   cancellation-race test asserting the order stays cancelled, the payment still resolves to
+   `success` in the ledger, and `logger.error` fires with the right detail); `commerce-checkout
+   .test.ts` grew from 11 to 13 (stale-claim reclaim, and a fresh-claim-is-NOT-reclaimed control
+   test); `commerce-orders.test.ts` grew from 7 to 8 (both `fulfilled -> refunded` and
+   `paid -> refunded` directly rejected). Full re-verification: clean `pnpm typecheck`/`pnpm lint`
+   workspace-wide, all commerce/payments test files passing individually, the full `apps/admin`
+   suite (162 tests) clean in one run.
+
+## Commerce (Phase 2d review fixes, round 2 — concurrency) — done, 2026-09-08
+
+A second direct review of the merged review-fix round found the first round's own two remaining
+gaps were still check-then-act races, not durable database guarantees:
+
+1. **Payment initialization race.** `getPendingPaymentAttemptForOrder` followed by a separate
+   insert was still a genuine TOCTOU race — two concurrent `POST /orders/{id}/initialize` calls
+   could both observe no pending attempt before either had inserted one, and both proceed to call
+   Paystack. Fixed with a new `plugin_commerce_order_payments_one_pending_per_order_idx` — a
+   **partial unique index** (`WHERE status = 'pending'`) enforced by SQLite itself, not
+   application logic. `claimPendingPaymentAttempt` (`repository/payments.ts`) now generates the
+   reference and reserves the row via `.onConflictDoNothing().returning()` *before* Paystack is
+   ever called; only one of two truly concurrent claims can win. The loser never calls Paystack —
+   it inspects whatever attempt did win (re-verifying it with Paystack) and either reuses it,
+   waits, or (if that one just resolved as failed) claims a genuinely fresh slot itself. A
+   provider error after a successful claim is handled by `abandonPaymentAttempt`, freeing the slot
+   rather than leaving a dead `'pending'` row blocking the order forever.
+2. **Checkout idempotency's stale-claim recovery wasn't sufficient on its own.** The first
+   round's 30s stale-claim reclaim (`repository/idempotency.ts`) is itself atomic — but atomicity
+   of *reassigning* a claim does nothing to stop the *original* request (merely slow, not
+   crashed) from continuing to run. Two executions could therefore both reach `createOrder` for
+   the same key. Fixed with a durable, DB-enforced invariant one level down, independent of that
+   table's own timing entirely: a new `idempotencyKey` column on `plugin_commerce_orders`,
+   UNIQUE, populated from `POST /checkout`'s own required header. `createOrder`
+   (`repository/orders.ts`) now inserts the order row itself via
+   `.onConflictDoNothing().returning()` against this constraint, as its own standalone step
+   *before* inserting items or deleting the cart — deliberately not folded into the same batch,
+   since a conflicting order insert combined with item inserts referencing it would trip the
+   items' own FK constraint and abort the whole batch instead of behaving predictably. A losing
+   execution gives back whatever stock it speculatively reserved and returns the **winner's**
+   order (looked up by `idempotencyKey`) instead of creating a second one — so even the two
+   executions the stale-claim reclaim doc explicitly permits can never produce two orders. The
+   claim/reclaim table is kept exactly as-is: an availability mechanism (nothing gets stuck
+   forever) and a response-caching fast path, not the correctness guarantee — that job now belongs
+   entirely to the database constraint.
+3. Two new, genuine concurrency tests (both using real `Promise.all`, not simulated): `commerce-
+   payments.test.ts` gained a test asserting Paystack's `initializeTransaction` is called exactly
+   once across two simultaneous `POST /orders/{id}/initialize` calls for the same order (22 → 23
+   tests); `commerce-checkout.test.ts` gained a test calling `createOrder` directly, twice
+   concurrently with the same `idempotencyKey` but two independent carts — deliberately bypassing
+   the claim-table entirely to isolate and prove the new DB-level invariant specifically — asserting
+   exactly one order results, both callers receive the identical order, and the losing cart's
+   speculative stock reservation is correctly given back (13 → 14 tests).
+
+Full re-verification: clean `pnpm typecheck`/`pnpm lint` workspace-wide, every commerce/payments
+test file passing individually, the full `apps/admin` suite (162 tests) clean in one run.
+
+## Commerce (Phase 2d review fixes, round 3) and CI stabilization — done, 2026-09-08
+
+A third review found four more gaps in the checkout/payments concurrency work, all closed, plus
+two unrelated CI-stability issues found while landing them.
+
+1. **Checkout partial-state race.** `createOrder` inserted the order row as its own standalone
+   statement, separate from the item-insert/cart-delete batch — a losing concurrent execution (or
+   a crash) could leave an order observably existing with zero items. Fixed by folding the order
+   insert, every item insert, and the cart delete into ONE atomic batch: a losing execution's
+   order insert is skipped by `.onConflictDoNothing()`, so its own item inserts (which reference
+   its own `orderId` via a NOT NULL FK) violate that foreign key, aborting the whole batch — caught
+   and handled exactly like the prior "lost the race" path (give back stock, return the winner's
+   order). A winning execution's order, items, and cart-delete now commit together or not at all.
+2. **Orphaned payment claim, made safe against a still-running (not dead) original request.**
+   `reclaimStaleUnauthorizedAttempt` (a 30s-stale, no-`authorizationUrl` claim) originally flipped
+   `status` to `'failed'` — safe only if the claiming request had actually crashed. If it was
+   merely slow and later called back into `resolvePaymentAttempt` with a genuine success, that
+   function's `WHERE status = 'pending'` conditional UPDATE would no longer match, silently
+   stranding a real payment. Fixed with a new `reclaimed_at` column (migration `0031`) and a
+   changed partial unique index — `WHERE status = 'pending' AND reclaimed_at IS NULL`. Reclaiming
+   now only sets `reclaimed_at`, freeing the slot for a fresh claim without ever touching `status`,
+   so a late-but-genuine resolution from the original request still transitions the order
+   correctly. Verified directly: a stale claim is reclaimed for a fresh attempt, then the
+   *original* reference resolves for real via webhook, and the order still ends up `paid`.
+3. **Migration safety for pre-existing duplicate data.** The partial unique index from the prior
+   round's own fix (`plugin_commerce_order_payments_one_pending_per_order_idx`) would fail to
+   create on any database that had already run the pre-fix racy claim code and accumulated more
+   than one `'pending'` row for the same order. Migration `0030` now runs a defensive cleanup
+   `UPDATE` first — keeping the most recent pending attempt per order, marking older duplicates
+   `'failed'` (never deleting the ledger row) — before creating the index. Verified with a
+   dedicated test that reproduces the violation and proves both the cleanup and the index creation
+   succeed against real, deliberately-dirtied data.
+4. **Payment authority.** `PATCH /orders/{id}/status` (admin/editor) allowed setting an order
+   straight to `'paid'` by hand — a real financial-integrity gap, since payment settlement is
+   supposed to be exclusively driven by a real Paystack verify/webhook. `VALID_TRANSITIONS`
+   (`repository/orders.ts`) no longer includes `pending -> paid`; only `resolvePaymentAttempt`'s
+   own direct, atomic update (bypassing this transition table entirely) can make that move.
+
+Landing this surfaced two unrelated CI-only issues, both fixed the same pass: `apps/api`'s CI job
+ran its full ~39-file suite as one unbatched `vitest run`, contending hard enough on GitHub's
+shared runners to produce real, non-code failures (timeouts, spurious 500s) — `fileParallelism:
+false` plus a raised `testTimeout`/`hookTimeout` (20s) in `vitest.config.ts` fixed it, the same
+"stop running everything at once" fix this project's own local dev practice already uses by hand.
+Separately, a test that looked like a genuine "both requests got 409" race turned out to be a
+latent bug in the test's own assertion: `[status, status].sort()` sorts as **strings** with no
+comparator, so `"409"` always sorts after `"201"` — the assertion could never pass whenever either
+response was genuinely 409, even though the test's own comment already documented that as
+acceptable. Confirmed via temporary debug logging on a throwaway CI branch (a "both literally 409"
+branch never fired); fixed by comparing with `includes()`/`every()` instead of `.sort()` position.
+
+## Commerce (Phase 2e: storefront integration) — done, 2026-09-08
+
+Wires the whole cart → checkout → pay → verify flow into a real rendered storefront, closing the
+last item this document's own status line had tracked as not started. Two pieces: a real gap found
+in the public catalog API while building this (fixed first), and the actual client/storefront work.
+
+**Public catalog gap: product detail had no images or variants.** `GET .../public/v1/products`
+(list) and `.../products/{slug}` (detail) had shipped in Phase 2a with neither — meaning no
+storefront could ever have rendered a product photo or a size/color picker, full stop, regardless
+of how the client or storefront code was written. Fixed by extending the **detail** route only
+(`routes/public.ts`): `images` (id, mediaId, altText, sortOrder) and `variants` (active only —
+archived variants are filtered out the same way `cart.ts`'s own add-to-cart check already treats
+them, since they're never orderable). The **list** route deliberately stays lean, still no images/
+variants — fetching every product's images/variants for a grid view one click away from the detail
+page that already has them would mean an extra query per row for data that view doesn't need.
+Verified with a real test: a product with one active and one archived variant, plus a real
+uploaded-and-associated Core media image, confirms the detail response includes exactly the active
+variant and the image, and confirms the list response carries neither field.
+
+**`@kenresoft-cms/astro` gained a `commerce` client namespace** (`integrations/astro/src/index.ts`)
+— categories/products (list/get), cart (get/addItem/updateItem/removeItem/clear), checkout
+(submit), and payments (initialize/verify). Types are hand-mirrored from the plugin's own Zod
+route schemas, not imported — `packages/plugin-ecommerce` isn't published to npm (unlike
+`@kenresoft-cms/contracts`), so there's nothing to import from outside the monorepo. Every
+commerce call sets `credentials: 'include'`: cart identity is a cookie the API sets directly on
+its own origin, which a storefront's own origin must be present in that deployment's
+`CORS_ORIGINS` to send/receive at all (docs/PLUGINS.md's Phase 2b CSRF section already covers why).
+`products.get()` follows `entries.get()`'s own "404 -> null" convention; every mutating call throws
+`KenresoftApiError` on a non-2xx response, matching the rest of this client.
+
+**Deliberately guest-only for this pass** — customer account registration/login, order history,
+and saved addresses aren't wired into the client yet. This isn't a stopgap: guest checkout is
+already Commerce's own complete, independently-supported purchase path (Phase 2b/2c's own design),
+so shipping a real, working guest storefront now and layering account features in as a genuine
+follow-up is the same "ship the real thing, flag the rest" pattern this document uses throughout,
+not scope cut for its own sake.
+
+**`examples/astro-site` gained a real storefront**: `/shop` (SSR product grid), `/shop/[slug]`
+(SSR product detail — images, a variant picker with live price updates, an add-to-cart form),
+`/cart` (client-rendered — cart identity is a browser cookie, which server-side Astro frontmatter
+has no natural way to receive and hand back to the browser without manually proxying `Set-Cookie`
+through `Astro.cookies`, so every cart/checkout/payment mutation in this example runs client-side
+via a `<script>` importing `@kenresoft-cms/astro` directly, not in SSR frontmatter — the same
+pattern any other frontend framework consuming this frontend-agnostic API would use), and
+`/order/[id]` (the payment `callbackUrl` target — reads Paystack's own `?reference=` query param,
+calls `payments.verify()`, and shows the order's real, server-confirmed status). The checkout flow
+handles the no-payment-provider-configured case explicitly rather than leaving it broken: if
+`payments.initialize()` 503s, the confirmation renders inline from the checkout response already
+in hand, since there's no public "get order by id" endpoint to re-fetch a guest's order from
+otherwise (by design — a guest order's id is a bearer capability, not something a plugin needlessly
+exposes a lookup route for, matching this document's own guest-cart-id reasoning in 2b).
+
+Verified live, end-to-end, against a real local API instance (dedicated port, isolated D1
+persist-to path — never a developer's own `wrangler dev` state) and a real headless-Chromium
+browser (Playwright), not just `astro check`/a build: seeded a real product with a variant via the
+admin API, confirmed the public detail endpoint returns it correctly, then drove the actual
+rendered pages — shop listing shows the product, the detail page's variant selector updates the
+displayed price live, add-to-cart succeeds, the cart page shows the added item and a quantity
+update sticks, and submitting checkout (on an instance with no `PAYSTACK_SECRET_KEY` configured,
+deliberately, since no real Paystack credentials are available to this environment) correctly
+falls through to the inline confirmation rather than breaking. Zero unexpected console errors —
+the one 503 logged is the deliberate payments-unconfigured path being exercised, not a bug.
+
+## Paystack developer status UI — done, 2026-09-09
+
+A developer-experience-only pass, not a change to how payments/secrets actually work: an operator
+setting up (or troubleshooting) a deployment previously had no way to check whether
+`PAYSTACK_SECRET_KEY` was actually set, or whether it was a test or live key, short of reading
+source or trying a real checkout. Closed with one additive method on the existing provider
+boundary, never by loosening it.
+
+`PaymentProvider`/`PluginPaymentsService` (`apps/api/src/lib/payments/types.ts`,
+`packages/plugin-sdk/src/context.ts`) both gained `getStatus(): { configured: boolean;
+environment: 'test' | 'live' | 'unknown' }` — local, synchronous, no network call. The Paystack
+implementation (`paystack.ts`) derives `environment` purely from which of Paystack's two
+documented prefixes (`sk_test_`/`sk_live_`) the already-in-hand secret starts with; the noop
+implementation (`noop.ts`) always reports `{ configured: false, environment: 'unknown' }`. Neither
+implementation, nor the new route below, ever returns the key itself or anything derived from more
+than its own prefix — `getStatus()` exists specifically so a plugin (or this admin UI) never needs
+to see the credential to answer "is this set up." `apps/api/src/plugins/context.ts`'s
+`createPluginPaymentsService` needed no change at all — it already passes `PaymentProvider`
+through to `PluginPaymentsService` verbatim, and the two interfaces are still identical shapes.
+
+New `GET /api/plugins/commerce/v1/settings/payment-status` (`packages/plugin-ecommerce/src/routes/
+settings.ts`, same no-role-gate treatment as the existing settings `GET /`, since this is a
+read-only, non-sensitive status readout, not a mutation) calls `ctx.payments.getStatus()` and
+returns exactly `{ provider: 'Paystack', configured, environment }` — nothing else, by
+construction (the response schema is a closed Zod object, not a passthrough of whatever the
+provider returns).
+
+`apps/admin`'s Commerce Settings page (`apps/admin/src/plugins/commerce/SettingsPage.tsx`) gained
+a new Paystack section (`PaystackSection.tsx`): a "Verify configuration" button that calls the new
+endpoint on demand (not fetched automatically on page load, since this is meant as an explicit
+check, not ambient page data) and renders Not configured / Configured badges, an
+environment-specific banner (a plain informational note for test, a visually distinct
+destructive-toned warning for live — "real transactions will be processed"), copy-pasteable
+`.dev.vars`/`wrangler secret put PAYSTACK_SECRET_KEY` setup snippets, and the deployment's own
+webhook URL (`${API_URL}/api/plugins/commerce/public/v1/payments/webhook`, derived from the
+admin app's existing `API_URL` — never a hardcoded domain) with a copy-to-clipboard button, plus
+links out to Paystack's dashboard and docs. The page never has a field that accepts a secret or
+public key of any kind — setup instructions are shown as plain text/code blocks, matching this
+integration's server-redirect-only design (no inline/JS widget ever needs a public key at all).
+When not configured, the page explains plainly that Commerce still works — catalog/order
+management is unaffected — only payment initialization is disabled until a key is set, matching
+`PaymentProvider`'s own existing "not configured" convention rather than treating it as an error.
+
+`docs/DEPLOYMENT.md` gained a "Commerce: configuring Paystack (optional)" section (see there) so
+this is documented for a fresh deployment without needing to read source or find this admin page
+first.
+
+Verified live against a real, isolated `wrangler dev` instance (dedicated `--persist-to`
+path/port, killed and confirmed via `netstat`/`taskkill` before starting, per this project's own
+standing Windows note that a background task's shell id doesn't reliably kill the underlying
+`workerd`/`node` tree): with `PAYSTACK_SECRET_KEY` unset, both the API route and the admin UI
+correctly show "not configured"; setting a fake `sk_test_...` value in that isolated instance's
+own `.dev.vars` flips the response to `{ configured: true, environment: 'test' }` and the UI shows
+the test-mode banner; setting a fake `sk_live_...` value flips it to `environment: 'live'` and the
+UI shows the live-transactions warning. The actual HTTP response body was inspected directly for
+every case (not just the rendered UI) to confirm it never carries anything beyond
+`provider`/`configured`/`environment` — no key, no prefix, no length, nothing key-shaped. New
+tests: `paystack-provider.test.ts` gained `getStatus()` coverage for the noop provider and both
+Paystack key prefixes plus an unrecognized-prefix case (`unknown`); a new
+`commerce-payment-status.test.ts` exercises the real route end-to-end against real D1 (session
+required, and the response's own key set asserted to be exactly `{configured, environment,
+provider}`).

@@ -1,6 +1,9 @@
 import { createDb } from '@kenresoft-cms/database';
+import { listItemsWithDetail } from '@kenresoft-cms/plugin-ecommerce/src/repository/cart-items';
+import { getGuestCart } from '@kenresoft-cms/plugin-ecommerce/src/repository/carts';
 import { createCustomerSession } from '@kenresoft-cms/plugin-ecommerce/src/repository/customer-sessions';
 import { createCustomer } from '@kenresoft-cms/plugin-ecommerce/src/repository/customers';
+import { createOrder } from '@kenresoft-cms/plugin-ecommerce/src/repository/orders';
 import { SELF, env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -79,6 +82,7 @@ describe('commerce plugin: checkout (real D1)', () => {
   beforeEach(async () => {
     await env.DB.exec('DELETE FROM plugin_commerce_order_items');
     await env.DB.exec('DELETE FROM plugin_commerce_orders');
+    await env.DB.exec('DELETE FROM plugin_commerce_idempotency_keys');
     await env.DB.exec('DELETE FROM plugin_commerce_cart_items');
     await env.DB.exec('DELETE FROM plugin_commerce_carts');
     await env.DB.exec('DELETE FROM plugin_commerce_customer_sessions');
@@ -343,15 +347,158 @@ describe('commerce plugin: checkout (real D1)', () => {
       body: JSON.stringify({ email: 'guest@example.test', name: 'Guest Buyer', shippingAddress: SHIPPING_ADDRESS }),
     };
     const [resA, resB] = await Promise.all([SELF.fetch(CHECKOUT_BASE, requestInit), SELF.fetch(CHECKOUT_BASE, requestInit)]);
+    let statuses = [resA.status, resB.status];
 
     // Whichever request loses the claim race either replays the winner's cached 201 or, if it
     // arrived before the winner had finished, gets a 409 asking it to retry shortly — both are
     // acceptable outcomes of "never double-process," unlike a second, distinct order existing.
-    const statuses = [resA.status, resB.status].sort();
-    expect([201, 409]).toContain(statuses[0]);
-    expect(statuses[1]).toBe(201);
+    // Checked via `includes`/`every`, NOT `.sort()` position: `[status, status].sort()` sorts as
+    // STRINGS by default (no comparator), and "409" always sorts after "201" lexically — so a
+    // naive `expect(statuses[1]).toBe(201)` after a bare `.sort()` can NEVER pass whenever either
+    // response is genuinely 409, even though this comment already documented that outcome as
+    // acceptable. That was a real, latent bug in this assertion itself (not a product bug):
+    // confirmed by adding temporary debug logging around a "both literally 409" branch on CI,
+    // which never fired — proving the actual pair was the ordinary, documented-fine [201, 409]
+    // the old sort-based comparison simply couldn't express, not a genuine double-409 race.
+    if (!statuses.includes(201)) {
+      // A genuine both-409 outcome (neither request ever saw itself as the claim winner nor as a
+      // completed replay) isn't itself impossible — repository/idempotency.ts's own comment on
+      // the sibling `createOrder` check acknowledges a claim row's own insert may not yet be
+      // visible to a near-simultaneous read — so retry once with the same key rather than assume
+      // the system is permanently stuck.
+      const retry = await SELF.fetch(CHECKOUT_BASE, requestInit);
+      statuses = [retry.status];
+    }
+    expect(statuses).toContain(201);
+    expect(statuses.every((status) => status === 201 || status === 409)).toBe(true);
 
     const orderCount = await env.DB.prepare('SELECT COUNT(*) as count FROM plugin_commerce_orders').first<{ count: number }>();
     expect(orderCount?.count).toBe(1);
+  });
+
+  it('a stale idempotency claim (the original request crashed before completing) is reclaimed rather than blocking the key forever', async () => {
+    const adminCookie = await freshAdminCookie();
+    const product = await createPublishedProduct(adminCookie);
+    const { cookie } = await addToGuestCart(product.id);
+    const idempotencyKey = crypto.randomUUID();
+
+    // Simulates a request that claimed the key but crashed/was killed before ever calling
+    // completeIdempotencyKey — the exact shape claimIdempotencyKey's own INSERT produces, just
+    // with an old createdAt (60s, well past the 30s staleness cutoff).
+    const staleTimestamp = Math.floor((Date.now() - 60_000) / 1000);
+    await env.DB.prepare(
+      `INSERT INTO plugin_commerce_idempotency_keys (id, response_status, response_body, created_at) VALUES (?, NULL, NULL, ?)`,
+    )
+      .bind(`checkout:${idempotencyKey}`, staleTimestamp)
+      .run();
+
+    const res = await SELF.fetch(CHECKOUT_BASE, {
+      method: 'POST',
+      headers: { Cookie: cookie!, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ email: 'guest@example.test', name: 'Guest Buyer', shippingAddress: SHIPPING_ADDRESS }),
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it('a genuinely recent in-progress idempotency claim is NOT reclaimed — the caller gets 409, not a second attempt to process it', async () => {
+    const idempotencyKey = crypto.randomUUID();
+    const recentTimestamp = Math.floor(Date.now() / 1000);
+    await env.DB.prepare(
+      `INSERT INTO plugin_commerce_idempotency_keys (id, response_status, response_body, created_at) VALUES (?, NULL, NULL, ?)`,
+    )
+      .bind(`checkout:${idempotencyKey}`, recentTimestamp)
+      .run();
+
+    const res = await SELF.fetch(CHECKOUT_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ email: 'nobody@example.test', name: 'Nobody', shippingAddress: SHIPPING_ADDRESS }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it('createOrder enforces one order per idempotency key even when two calls run concurrently, bypassing the claim-table entirely (issue 2 of the payments concurrency review)', async () => {
+    // Deliberately calls the repository function directly rather than through POST /checkout —
+    // the plugin_commerce_idempotency_keys claim/reclaim table (above) already prevents two
+    // ordinary HTTP requests with the same key from both reaching this point under normal
+    // circumstances; what this proves is the DURABLE, DB-enforced invariant that's supposed to
+    // hold even if that table's own 30s stale-claim recovery ever lets two executions run
+    // concurrently anyway (its reclaim step only ever reassigns which request is considered "the
+    // owner" — it does nothing to actually stop the original, still-running request from
+    // continuing to execute). Two independent guest carts (rather than one shared cart) isolate
+    // this assertion from cart-consumption/stock-race behavior, which the other concurrency tests
+    // in this file already cover.
+    const adminCookie = await freshAdminCookie();
+    const productA = await createPublishedProduct(adminCookie);
+    const variantA = await createVariant(adminCookie, productA.id, { stockQty: 5 });
+    const productB = await createPublishedProduct(adminCookie);
+    const variantB = await createVariant(adminCookie, productB.id, { stockQty: 5 });
+
+    const addA = await addToGuestCart(productA.id, variantA.id, 2);
+    const addB = await addToGuestCart(productB.id, variantB.id, 3);
+    const cartIdA = addA.cookie!.split('=')[1]!;
+    const cartIdB = addB.cookie!.split('=')[1]!;
+
+    const db = createDb(env.DB);
+    const [cartA, itemsA, cartB, itemsB] = await Promise.all([
+      getGuestCart(db, cartIdA),
+      listItemsWithDetail(db, cartIdA),
+      getGuestCart(db, cartIdB),
+      listItemsWithDetail(db, cartIdB),
+    ]);
+
+    const idempotencyKey = crypto.randomUUID();
+    const [resultA, resultB] = await Promise.all([
+      createOrder(db, {
+        cartId: cartA!.id,
+        customerId: null,
+        customerEmail: 'a@example.test',
+        customerName: 'Buyer A',
+        currency: cartA!.currency,
+        shippingAddress: SHIPPING_ADDRESS,
+        items: itemsA,
+        idempotencyKey,
+      }),
+      createOrder(db, {
+        cartId: cartB!.id,
+        customerId: null,
+        customerEmail: 'b@example.test',
+        customerName: 'Buyer B',
+        currency: cartB!.currency,
+        shippingAddress: SHIPPING_ADDRESS,
+        items: itemsB,
+        idempotencyKey,
+      }),
+    ]);
+
+    expect(resultA.ok).toBe(true);
+    expect(resultB.ok).toBe(true);
+    if (resultA.ok && resultB.ok) {
+      // Both callers get back the SAME order — exactly one was ever actually created for this key.
+      expect(resultA.order.id).toBe(resultB.order.id);
+
+      // Issue 1 of the payments concurrency review: the order and its items must land together,
+      // atomically — never an order row that exists with zero items (the prior two-batch design's
+      // partial-state gap). Exactly one order item exists for the winning order, regardless of
+      // which cart actually won the race.
+      const itemCount = await env.DB.prepare('SELECT COUNT(*) as count FROM plugin_commerce_order_items WHERE order_id = ?')
+        .bind(resultA.order.id)
+        .first<{ count: number }>();
+      expect(itemCount?.count).toBe(1);
+    }
+
+    const orderCount = await env.DB.prepare('SELECT COUNT(*) as count FROM plugin_commerce_orders').first<{ count: number }>();
+    expect(orderCount?.count).toBe(1);
+
+    // Whichever cart's speculative stock reservation "lost" the idempotency-key race was given
+    // back in full — exactly one of the two variants shows its original stock untouched, the
+    // other decremented by its own order line's quantity (2 or 3, matching whichever cart's
+    // order actually won).
+    const stockA = await env.DB.prepare('SELECT stock_qty FROM plugin_commerce_product_variants WHERE id = ?').bind(variantA.id).first<{ stock_qty: number }>();
+    const stockB = await env.DB.prepare('SELECT stock_qty FROM plugin_commerce_product_variants WHERE id = ?').bind(variantB.id).first<{ stock_qty: number }>();
+    const decrementedCount = [stockA?.stock_qty === 3, stockB?.stock_qty === 2].filter(Boolean).length;
+    expect(decrementedCount).toBe(1);
+    const untouchedCount = [stockA?.stock_qty === 5, stockB?.stock_qty === 5].filter(Boolean).length;
+    expect(untouchedCount).toBe(1);
   });
 });

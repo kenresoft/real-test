@@ -36,6 +36,22 @@ describe('noop payment provider', () => {
     await expect(provider.verifyTransaction('r')).rejects.toThrow();
     await expect(provider.verifyWebhookSignature('{}', 'anything')).resolves.toBe(false);
   });
+
+  it('getStatus reports not configured, never a key or anything key-shaped', () => {
+    const provider = getPaymentProvider(envWith(undefined));
+    expect(provider.getStatus()).toEqual({ configured: false, environment: 'unknown' });
+  });
+});
+
+describe('Paystack provider getStatus', () => {
+  it('reports test for a sk_test_ key, live for a sk_live_ key, and never the key itself', () => {
+    expect(createPaystackProvider(envWith('sk_test_abc123')).getStatus()).toEqual({ configured: true, environment: 'test' });
+    expect(createPaystackProvider(envWith('sk_live_abc123')).getStatus()).toEqual({ configured: true, environment: 'live' });
+  });
+
+  it('reports unknown for a configured key that matches neither documented prefix', () => {
+    expect(createPaystackProvider(envWith('not-a-real-prefix-abc')).getStatus()).toEqual({ configured: true, environment: 'unknown' });
+  });
 });
 
 describe('Paystack provider', () => {
@@ -102,11 +118,16 @@ describe('Paystack provider', () => {
     expect(result).toMatchObject({ status: 'success', reference: 'ref-1', amount: 5000, currency: 'NGN' });
   });
 
-  it('verifyTransaction maps every non-success Paystack status to this provider’s own status vocabulary', async () => {
+  it('verifyTransaction maps every Paystack status 1:1, never collapsing a non-terminal status into failed', async () => {
     for (const [paystackStatus, expected] of [
       ['failed', 'failed'],
       ['abandoned', 'abandoned'],
-      ['reversed', 'other'],
+      ['pending', 'pending'],
+      ['ongoing', 'ongoing'],
+      ['processing', 'processing'],
+      ['queued', 'queued'],
+      ['reversed', 'reversed'],
+      ['some-future-status-paystack-invents', 'other'],
     ] as const) {
       vi.stubGlobal(
         'fetch',

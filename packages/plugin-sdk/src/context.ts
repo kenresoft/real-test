@@ -59,7 +59,21 @@ export interface PluginEmailService {
   send(message: { to: string; subject: string; text: string; html?: string }): Promise<void>;
 }
 
-export type PaymentTransactionStatus = 'success' | 'failed' | 'abandoned' | 'other';
+// Mirrors apps/api/src/lib/payments/types.ts's own PaymentTransactionStatus exactly — Paystack's
+// real vocabulary is wider than success/failure: 'pending'/'ongoing'/'processing'/'queued' are
+// non-terminal, 'reversed' means a previously successful charge was reversed after the fact. A
+// caller must never collapse any of these into 'failed' — only 'success' and 'failed'/'abandoned'
+// are terminal outcomes.
+export type PaymentTransactionStatus =
+  | 'success'
+  | 'failed'
+  | 'abandoned'
+  | 'pending'
+  | 'ongoing'
+  | 'processing'
+  | 'queued'
+  | 'reversed'
+  | 'other';
 
 export interface InitializePaymentInput {
   amount: number;
@@ -84,6 +98,16 @@ export interface VerifyPaymentResult {
   raw: unknown;
 }
 
+// Mirrors apps/api/src/lib/payments/types.ts's own PaymentProviderStatus exactly — a deliberately
+// non-sensitive status snapshot for a developer-facing admin UI (Commerce Settings' Paystack
+// section). Never the key itself, never anything derived from it beyond which of Paystack's two
+// documented key prefixes (`sk_test_`/`sk_live_`) it starts with. 'unknown' covers a configured
+// key that doesn't match either documented prefix.
+export interface PaymentProviderStatus {
+  configured: boolean;
+  environment: 'test' | 'live' | 'unknown';
+}
+
 // Wraps Core's existing pluggable payment layer (apps/api/src/lib/payments/*, selected by whether
 // PAYSTACK_SECRET_KEY is set) — a plugin never picks a provider, sees its credentials, or calls
 // its REST API directly. Paystack is the only implementation today; this interface exists
@@ -97,6 +121,9 @@ export interface PluginPaymentsService {
   initializeTransaction(input: InitializePaymentInput): Promise<InitializePaymentResult>;
   verifyTransaction(reference: string): Promise<VerifyPaymentResult>;
   verifyWebhookSignature(rawBody: string, signatureHeader: string | undefined): Promise<boolean>;
+  // Non-sensitive, synchronous, no network call — see PaymentProviderStatus above for exactly
+  // what this may and may not expose.
+  getStatus(): PaymentProviderStatus;
 }
 
 // In-process, best-effort, synchronous only — not a durable queue. A handler runs synchronously

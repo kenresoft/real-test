@@ -367,6 +367,19 @@ export const pluginCommerceOrders = sqliteTable(
       country: string;
       phone: string | null;
     }>().notNull(),
+    // The durable, DB-enforced half of checkout idempotency — POST /checkout's client-supplied
+    // Idempotency-Key header, stored raw (not the "checkout:<key>" compound id
+    // plugin_commerce_idempotency_keys uses internally). This UNIQUE constraint is what actually
+    // guarantees at most one order per checkout attempt, independent of
+    // plugin_commerce_idempotency_keys' own claim/reclaim timing: that table's 30s stale-claim
+    // recovery deliberately allows a claim to be reassigned away from a request that's merely
+    // slow, not crashed — which does NOT stop the original, still-running request from continuing
+    // to execute. Two executions can therefore both reach repository/orders.ts's createOrder for
+    // the same key; this constraint is what ensures only one of them can ever actually insert an
+    // order — the loser detects the conflict, gives back any stock it speculatively reserved, and
+    // returns the winner's order instead of creating a second one. Nullable (not every hypothetical
+    // future order-creation path need supply one) but always set by checkout today.
+    idempotencyKey: text('idempotency_key').unique(),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`(unixepoch())`),
@@ -442,6 +455,10 @@ export const pluginCommerceOrderPayments = sqliteTable(
     status: text('status', { enum: ['pending', 'success', 'failed'] })
       .notNull()
       .default('pending'),
+    // Set once, at initialize time — lets a repeated POST /orders/{id}/initialize call while this
+    // reference is still 'pending' at Paystack return the SAME checkout session instead of
+    // starting a second, duplicate one for the same order (routes/payments.ts).
+    authorizationUrl: text('authorization_url'),
     // Null until resolved — set from the provider's own verified response, never from anything
     // client-supplied, and checked against the order's own totalAmount/currency before this row
     // is ever allowed to move the order to 'paid' (routes/payments.ts).
@@ -452,8 +469,37 @@ export const pluginCommerceOrderPayments = sqliteTable(
       .notNull()
       .default(sql`(unixepoch())`),
     resolvedAt: integer('resolved_at', { mode: 'timestamp' }),
+    // Set only by the stale-unauthorized-claim recovery path (repository/payments.ts's
+    // reclaimStaleUnauthorizedAttempt) — deliberately NOT a status transition. A row this old
+    // with no authorizationUrl looks abandoned, but the request that claimed it may simply still
+    // be running (a slow Paystack call, GC pause, a loaded CI/production runner), and could still
+    // legitimately call back into resolvePaymentAttempt with a real 'success' or 'failed' outcome
+    // after this reclaim happens. Changing `status` away from 'pending' would permanently break
+    // that: resolvePaymentAttempt's own conditional UPDATE only ever matches `status = 'pending'`,
+    // so a late-but-genuine success would silently fail to transition the order to paid — a real
+    // money-was-charged-but-order-still-shows-unpaid bug, not a cosmetic one. Marking reclaimedAt
+    // instead leaves `status` untouched (still 'pending', still resolvable later either way) and
+    // only removes the row from the partial unique index below, freeing the one-open-attempt slot
+    // for a genuinely fresh claim without invalidating the original request's own eventual outcome.
+    reclaimedAt: integer('reclaimed_at', { mode: 'timestamp' }),
   },
-  (table) => [index('plugin_commerce_order_payments_order_id_idx').on(table.orderId)],
+  (table) => [
+    index('plugin_commerce_order_payments_order_id_idx').on(table.orderId),
+    // Enforces "at most one open payment attempt per order" as a real DB constraint, not just
+    // application-level checking — repository/payments.ts's claimPendingPaymentAttempt relies on
+    // this directly (an INSERT racing against an existing 'pending' row for the same order
+    // conflicts and is detected via .onConflictDoNothing()), which is what makes two genuinely
+    // concurrent POST /orders/{id}/initialize calls for the same order safe: only one can ever
+    // win the insert, so at most one Paystack transaction is ever created per order at a time.
+    // Partial (WHERE status = 'pending' AND reclaimed_at IS NULL) so an order's own history of
+    // resolved (success/failed) attempts is never constrained — only ever one *open, not reclaimed*
+    // one at a time. The `reclaimed_at IS NULL` half is what lets a fresh claim be inserted after
+    // reclaiming a stale one without touching the old row's `status` (see reclaimedAt's own comment
+    // above for why status itself must stay 'pending').
+    uniqueIndex('plugin_commerce_order_payments_one_pending_per_order_idx')
+      .on(table.orderId)
+      .where(sql`${table.status} = 'pending' and ${table.reclaimedAt} is null`),
+  ],
 );
 
 // Backs Idempotency-Key enforcement on POST /checkout (docs/PLUGINS.md's Commerce section) — a
