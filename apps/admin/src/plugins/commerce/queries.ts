@@ -381,6 +381,12 @@ export function useUpdateCommerceCustomerDisabled(customerId: string) {
   });
 }
 
+export function useResendCommerceCustomerVerificationEmail(customerId: string) {
+  return useMutation({
+    mutationFn: () => apiClient.post<{ message: string }>(`${BASE}/customers/${customerId}/resend-verification-email`, {}),
+  });
+}
+
 // Phase 2c — Checkout & Orders. Editor-gated on the API side (matching catalog, not
 // admin-customers.ts's stricter admin floor — see routes/admin-orders.ts's own comment).
 

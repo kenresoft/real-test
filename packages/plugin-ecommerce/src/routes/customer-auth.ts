@@ -12,6 +12,7 @@ import {
   getCustomerSessionToken,
 } from '../lib/customer-session';
 import { requireTrustedOriginForMutations } from '../lib/origin-check';
+import { sendVerificationEmail } from '../lib/verification-email';
 import { mergeGuestCartIntoCustomerCart } from '../repository/carts';
 import { createCustomer, getCustomerByEmail, updateCustomerPassword, markCustomerEmailVerified, verifyCustomerPassword } from '../repository/customers';
 import { createCustomerSession, deleteCustomerSession, deleteAllSessionsForCustomer } from '../repository/customer-sessions';
@@ -89,21 +90,7 @@ customerAuthRoutes.openapi(
     const rawToken = await createCustomerSession(ctx.db, customer.id);
     setCustomerSessionCookie(c, rawToken);
     await mergeGuestCartIfPresent(c, ctx, customer.id);
-
-    const verifyToken = await createCustomerToken(ctx.db, customer.id, 'email_verification');
-    const config = (await ctx.config.get()) as CommerceConfig;
-    c.executionCtx.waitUntil(
-      ctx.email.send({
-        to: customer.email,
-        subject: 'Verify your email',
-        // config.siteUrl is optional (this plugin has no way to know a storefront's own URL on
-        // its own — same reasoning as Core's settings.previewUrl) — when it's unset, fall back to
-        // a plain instruction rather than a bare, unexplained token with nothing to do with it.
-        text: config.siteUrl
-          ? `Verify your email by visiting: ${config.siteUrl}/account/verify-email?token=${verifyToken}`
-          : `Verify your email with this token: ${verifyToken}`,
-      }),
-    );
+    await sendVerificationEmail(ctx.db, c.executionCtx.waitUntil.bind(c.executionCtx), ctx.email, ctx.config, customer);
 
     return c.json(toCustomer(customer), 201);
   },
@@ -250,5 +237,38 @@ customerAuthRoutes.openapi(
 
     await markCustomerEmailVerified(ctx.db, customerId);
     return c.json({ message: 'Email verified.' }, 200);
+  },
+);
+
+const resendVerificationSchema = z.object({ email: z.string().email() });
+
+customerAuthRoutes.openapi(
+  createRoute({
+    method: 'post',
+    path: '/verify-email/resend',
+    tags: ['Commerce Customer Auth'],
+    summary: 'Resend the email-verification link',
+    request: { body: { content: { 'application/json': { schema: resendVerificationSchema } } } },
+    responses: {
+      200: {
+        description: 'Always the identical generic response, regardless of whether the email matches an account or is already verified.',
+        content: { 'application/json': { schema: genericMessageSchema } },
+      },
+    },
+  }),
+  async (c) => {
+    const input = c.req.valid('json');
+    const ctx = c.get('pluginContext');
+    // Mirrors password-reset/request's own account-enumeration-resistant shape exactly — one
+    // generic response regardless of which of "no such account" / "already verified" /
+    // "disabled" / "sent" actually happened.
+    const genericResponse = { message: 'If that email is registered and not yet verified, a new verification email has been sent.' };
+
+    const customer = await getCustomerByEmail(ctx.db, input.email);
+    if (customer && !customer.disabled && !customer.emailVerified) {
+      await sendVerificationEmail(ctx.db, c.executionCtx.waitUntil.bind(c.executionCtx), ctx.email, ctx.config, customer);
+    }
+
+    return c.json(genericResponse, 200);
   },
 );
