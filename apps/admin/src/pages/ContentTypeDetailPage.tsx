@@ -10,7 +10,7 @@ import {
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, ListPlus, Pencil, Plus, Trash2 } from 'lucide-react';
-import { Link, useParams } from 'react-router';
+import { useParams } from 'react-router';
 import { toast } from 'sonner';
 
 import { ApiError } from '@/lib/api-client';
@@ -26,6 +26,7 @@ import {
 import { useDeveloperMode } from '@/lib/developer-mode';
 import { FIELD_TYPES, roleAtLeast, type FieldDefinition, type FieldType, type UserRole } from '@/lib/types';
 import { ContentTypeBadge } from '@/components/content-type-badge';
+import { ContentTypeTabs } from '@/components/content-type-tabs';
 import { ContentTypeDeveloperPanel } from '@/components/developer-panel/content-type-developer-panel';
 import { EmptyState } from '@/components/empty-state';
 import { FieldTypeBadge, fieldTypeIcon } from '@/components/field-type-badge';
@@ -63,6 +64,20 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 
 const OPTION_LIST_TYPES: FieldType[] = ['select', 'multi_select'];
 
+// Disambiguates field types that look interchangeable but aren't — most importantly `url`
+// (a plain, hand-typed link — never connects to the Media Library) vs. `media` (picks an
+// already-uploaded image from the Media Library). A content type built with `url` for what was
+// meant to be an image field has no way to attach an uploaded file to it; the fix is switching
+// that field's type to `media`, not something this select can prevent after the fact, so the
+// description is here to prevent the mistake up front.
+const FIELD_TYPE_DESCRIPTIONS: Partial<Record<FieldType, string>> = {
+  url: 'A plain link the editor types by hand — not connected to the Media Library.',
+  media: 'Picks an already-uploaded image from the Media Library.',
+  reference: 'Links to another entry.',
+  rich_text: 'Formatted text with a toolbar (bold, links, images, tables…).',
+  textarea: 'Plain multi-line text, no formatting.',
+};
+
 // Handles both "Add field" and "Edit field" — the same shape of form either way, just a POST
 // vs. a PATCH and different starting values. A single field prop (undefined = create mode)
 // avoids maintaining two near-identical dialogs. The form body is a separate component, keyed
@@ -82,7 +97,7 @@ function FieldDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>{trigger}</DialogTrigger>
-      <DialogContent>
+      <DialogContent size="md">
         <DialogHeader>
           <DialogTitle>{field ? 'Edit field' : 'Add field'}</DialogTitle>
           <DialogDescription>Fields define what the entry editor renders (§6.1).</DialogDescription>
@@ -193,6 +208,9 @@ function FieldForm({
                 })}
               </SelectContent>
             </Select>
+            {FIELD_TYPE_DESCRIPTIONS[fieldType] ? (
+              <p className="text-xs text-muted-foreground">{FIELD_TYPE_DESCRIPTIONS[fieldType]}</p>
+            ) : null}
           </div>
 
           {OPTION_LIST_TYPES.includes(fieldType) ? <OptionListEditor options={options} onChange={setOptions} /> : null}
@@ -239,11 +257,13 @@ function EditContentTypeDialog({
   name,
   slug,
   description,
+  routePattern,
 }: {
   contentTypeId: string;
   name: string;
   slug: string;
   description: string | null;
+  routePattern: string | null;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -269,6 +289,7 @@ function EditContentTypeDialog({
             name={name}
             slug={slug}
             description={description}
+            routePattern={routePattern}
             onDone={() => setOpen(false)}
           />
         ) : null}
@@ -285,17 +306,20 @@ function ContentTypeForm({
   name,
   slug,
   description,
+  routePattern,
   onDone,
 }: {
   contentTypeId: string;
   name: string;
   slug: string;
   description: string | null;
+  routePattern: string | null;
   onDone: () => void;
 }) {
   const [nameValue, setNameValue] = useState(name);
   const [slugValue, setSlugValue] = useState(slug);
   const [descriptionValue, setDescriptionValue] = useState(description ?? '');
+  const [routePatternValue, setRoutePatternValue] = useState(routePattern ?? '');
   const [error, setError] = useState<string | null>(null);
   const updateContentType = useUpdateContentType(contentTypeId);
 
@@ -307,6 +331,7 @@ function ContentTypeForm({
         name: nameValue,
         slug: slugValue,
         description: descriptionValue || null,
+        routePattern: routePatternValue.trim() || null,
       });
       toast.success('Content type updated');
       onDone();
@@ -334,6 +359,21 @@ function ContentTypeForm({
           value={descriptionValue}
           onChange={(e) => setDescriptionValue(e.target.value)}
         />
+      </div>
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="content-type-edit-route-pattern">Route pattern</Label>
+        <Input
+          id="content-type-edit-route-pattern"
+          placeholder="/blog/{slug}"
+          value={routePatternValue}
+          onChange={(e) => setRoutePatternValue(e.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">
+          Optional. Lets a frontend resolve a URL like "/blog/my-post" to an entry of this
+          content type without a developer wiring a specific route for it. Leave blank if this
+          content type isn't addressed by its own URL. Must end with exactly one "{'{slug}'}"
+          parameter, e.g. "/blog/{'{slug}'}".
+        </p>
       </div>
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       <DialogFooter>
@@ -469,22 +509,18 @@ export function ContentTypeDetailPage() {
         items={[
           { label: 'Content types', to: '/content-types' },
           { label: contentType?.name ?? '…', to: `/content-types/${contentTypeId}` },
-          { label: 'Fields' },
         ]}
       />
 
       <PageHeader
-        title={contentType?.name ?? 'Fields'}
+        title="Schema"
         description={
           fields
-            ? `${fields.length} ${fields.length === 1 ? 'field' : 'fields'}${contentType?.description ? ` · ${contentType.description}` : ''}`
+            ? `${fields.length} ${fields.length === 1 ? 'field' : 'fields'} defining ${contentType?.name ?? 'this content type'}'s shape.`
             : 'Fields define what the entry editor renders.'
         }
         actions={
           <>
-            <Button variant="outline" asChild>
-              <Link to={`/content-types/${contentTypeId}/entries`}>View entries</Link>
-            </Button>
             {developerMode && contentType && fields ? (
               <ContentTypeDeveloperPanel contentType={contentType} fields={fields} />
             ) : null}
@@ -494,6 +530,7 @@ export function ContentTypeDetailPage() {
                 name={contentType.name}
                 slug={contentType.slug}
                 description={contentType.description}
+                routePattern={contentType.routePattern}
               />
             ) : null}
             {canManageFields && contentTypeId ? (
@@ -510,6 +547,8 @@ export function ContentTypeDetailPage() {
           </>
         }
       />
+
+      {contentTypeId ? <ContentTypeTabs contentTypeId={contentTypeId} active="schema" /> : null}
 
       {contentType && contentTypeId ? (
         <Card>

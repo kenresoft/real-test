@@ -66,14 +66,32 @@ async function uploadMedia(altText, colorTag) {
 async function main() {
   console.log(`Seeding ${API_URL} ...`);
 
-  // 1. Staff account — the FIRST signup on a deployment becomes Owner (docs/ARCHITECTURE.md §10).
-  const email = 'owner@example.com';
-  const password = 'correct-horse-battery-staple';
+  // 1. Staff account — a fresh deployment has no owner and public signup can never claim it
+  // (docs/ARCHITECTURE.md §10's bootstrap flow). This script never invents or seeds a known
+  // email/password: SEED_OWNER_EMAIL/SEED_OWNER_PASSWORD/SEED_OWNER_NAME and
+  // SEED_BOOTSTRAP_TOKEN must all be supplied explicitly, or seeding refuses outright rather
+  // than silently leaving a well-known credential standing on any instance, throwaway or not.
+  // Obtain the token by calling `POST /api/v1/system/bootstrap/request` against this same
+  // API_URL first and reading it out of that deployment's own `wrangler dev`/`wrangler tail`
+  // output (it is never returned over HTTP, by design).
+  const email = process.env.SEED_OWNER_EMAIL;
+  const password = process.env.SEED_OWNER_PASSWORD;
+  const name = process.env.SEED_OWNER_NAME ?? 'Site Owner';
+  const bootstrapToken = process.env.SEED_BOOTSTRAP_TOKEN;
+  if (!email || !password || !bootstrapToken) {
+    throw new Error(
+      'Set SEED_OWNER_EMAIL, SEED_OWNER_PASSWORD, and SEED_BOOTSTRAP_TOKEN before seeding — ' +
+        'this script no longer generates or assumes any staff credentials. Run ' +
+        `\`curl -X POST ${API_URL}/api/v1/system/bootstrap/request\` and read the token from ` +
+        'this deployment\'s own server logs to get SEED_BOOTSTRAP_TOKEN.',
+    );
+  }
   try {
-    await req('POST', '/api/v1/auth/sign-up/email', { email, password, name: 'Site Owner' });
-    console.log('Created staff owner account.');
+    await req('POST', '/api/v1/system/bootstrap/complete', { token: bootstrapToken, email, password, name });
+    console.log('Created staff owner account via bootstrap.');
+    await req('POST', '/api/v1/auth/sign-in/email', { email, password });
   } catch (err) {
-    console.log('Staff signup failed (already exists?) — trying sign-in instead:', err.message);
+    console.log('Bootstrap failed (installation already initialized?) — trying sign-in instead:', err.message);
     await req('POST', '/api/v1/auth/sign-in/email', { email, password });
   }
 
@@ -240,7 +258,15 @@ async function main() {
   console.log('Created commerce products (ceramic mug with 3 variants incl. one sold-out, canvas tote with no variants, one draft product).');
 
   console.log('\nSeed complete.');
-  console.log(`Staff login: ${email} / ${password}`);
+  // Deliberately doesn't echo the password itself, even to a local terminal (CodeQL flagged the
+  // prior version — js/clear-text-logging) — print only where it came from, since it's either
+  // this script's own committed default or a value the caller just set themselves.
+  console.log(`Staff login email: ${email}`);
+  console.log(
+    process.env.SEED_OWNER_PASSWORD
+      ? 'Staff login password: the value you set in SEED_OWNER_PASSWORD.'
+      : "Staff login password: this script's default — see SEED_OWNER_PASSWORD in this file's own source.",
+  );
 }
 
 main().catch((err) => {

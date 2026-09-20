@@ -16,7 +16,13 @@ export const user = sqliteTable("user", {
     .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)
     .$onUpdate(() => /* @__PURE__ */ new Date())
     .notNull(),
-  role: text("role").default("editor").notNull(),
+  // 'none' = a normal website/application user with NO CMS access (e.g. a storefront
+  // customer); every other value is a CMS role (contracts' USER_ROLES). The default is the
+  // no-access value on purpose: anything that creates a user without explicitly, server-side
+  // granting a CMS role (public sign-up included) must never yield CMS access. Only
+  // authorized server-side code (bootstrap owner, Add User, role change, ownership transfer)
+  // ever writes a CMS role; the client can never set this field (auth-options.ts, input: false).
+  role: text("role").default("none").notNull(),
   disabled: integer("disabled", { mode: "boolean" }).default(false).notNull(),
   // Whether this user can see the Developer panel (apps/admin/src/lib/developer-mode.ts) when
   // the deployment-wide Developer Mode flag is also on. Owner/admin always qualify regardless
@@ -29,6 +35,12 @@ export const user = sqliteTable("user", {
   // auth-options.ts) — column name/shape here must match what that plugin expects verbatim,
   // not a field this app's own code ever writes directly.
   twoFactorEnabled: integer("two_factor_enabled", { mode: "boolean" }).default(false).notNull(),
+  // Which webmail app "Reply by email" (form-submissions UX) opens for this person specifically
+  // — a plain string enum (gmail/outlook/yahoo/zoho), null meaning "use the OS/browser's default
+  // mailto: handler". Unlike role/disabled/developerToolsAccess above, this one IS client-settable
+  // (additionalFields' input: true in auth-options.ts) since it's a harmless personal UI
+  // preference the account owner sets for themselves, not an admin-granted capability.
+  preferredMailClient: text("preferred_mail_client"),
 });
 
 export const session = sqliteTable(

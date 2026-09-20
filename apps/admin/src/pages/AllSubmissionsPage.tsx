@@ -1,13 +1,20 @@
 import { useMemo, useState } from 'react';
-import { Archive, Inbox, MailOpen, MoreHorizontal } from 'lucide-react';
-import { Link } from 'react-router';
+import { Archive, ExternalLink, Inbox, MailOpen, MoreHorizontal, Paperclip, Trash2 } from 'lucide-react';
+import { Link, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import type { ColumnDef } from '@tanstack/react-table';
 
 import { ApiError } from '@/lib/api-client';
+import { authClient } from '@/lib/auth-client';
+import { buildReplyLink, opensInNewTab } from '@/lib/mail-compose-links';
 import { useForms } from '@/lib/queries/forms';
-import { useFormFields } from '@/lib/queries/form-fields';
-import { useAllSubmissions, useUpdateSubmissionStatusGlobal } from '@/lib/queries/all-submissions';
+import {
+  useAllSubmissions,
+  useDeleteSubmissionGlobal,
+  useUpdateSubmissionStatusGlobal,
+} from '@/lib/queries/all-submissions';
+import { getSubmissionAttachments } from '@/lib/submission-attachments';
+import { getSubmissionSender } from '@/lib/submission-sender';
 import type { FormSubmissionStatus, FormSubmissionWithForm } from '@/lib/types';
 import { DataTable } from '@/components/data-table';
 import { EmptyState } from '@/components/empty-state';
@@ -15,20 +22,24 @@ import { FormBadge } from '@/components/form-badge';
 import { PageBreadcrumb } from '@/components/page-breadcrumb';
 import { PageHeader } from '@/components/page-header';
 import { StatusBadge } from '@/components/status-badge';
-import { SubmissionValue } from '@/components/submission-value';
 import { TableSkeleton } from '@/components/table-skeleton';
-import { Button } from '@/components/ui/button';
+import { TestSubmissionBadge } from '@/components/test-submission-badge';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -36,42 +47,16 @@ import { Table, TableHeader, TableHead, TableRow } from '@/components/ui/table';
 
 type StatusFilter = 'all' | FormSubmissionStatus;
 
-function ViewSubmissionDialog({
+function SubmissionActions({
   submission,
-  onOpenChange,
+  onRequestDelete,
 }: {
-  submission: FormSubmissionWithForm | null;
-  onOpenChange: (open: boolean) => void;
+  submission: FormSubmissionWithForm;
+  onRequestDelete: (submission: FormSubmissionWithForm) => void;
 }) {
-  const { data: fields } = useFormFields(submission?.formId ?? '');
-  const fieldLabels = useMemo(() => new Map((fields ?? []).map((field) => [field.name, field.label])), [fields]);
-
-  return (
-    <Dialog open={submission !== null} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Submission</DialogTitle>
-          <DialogDescription>
-            {submission ? `${submission.formName} · ${new Date(submission.createdAt).toLocaleString()}` : null}
-          </DialogDescription>
-        </DialogHeader>
-        {submission ? (
-          <div className="flex flex-col gap-3">
-            {Object.entries(submission.data).map(([key, value]) => (
-              <div key={key} className="flex flex-col gap-1">
-                <span className="text-xs font-medium text-muted-foreground">{fieldLabels.get(key) ?? key}</span>
-                <SubmissionValue formId={submission.formId} submissionId={submission.id} fieldName={key} value={value} />
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function SubmissionActions({ submission }: { submission: FormSubmissionWithForm }) {
+  const { data: session } = authClient.useSession();
   const updateStatus = useUpdateSubmissionStatusGlobal();
+  const { name: senderName, email: senderEmail } = getSubmissionSender(submission.data);
 
   function setStatus(status: FormSubmissionStatus) {
     updateStatus.mutate(
@@ -79,6 +64,8 @@ function SubmissionActions({ submission }: { submission: FormSubmissionWithForm 
       { onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Failed to update submission') },
     );
   }
+
+  const preferredMailClient = session?.user.preferredMailClient ?? null;
 
   return (
     <DropdownMenu>
@@ -88,6 +75,24 @@ function SubmissionActions({ submission }: { submission: FormSubmissionWithForm 
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        {senderEmail ? (
+          <>
+            <DropdownMenuItem asChild>
+              <a
+                href={buildReplyLink(preferredMailClient, {
+                  to: senderEmail,
+                  subject: `Re: submission from ${senderName ?? senderEmail}`,
+                })}
+                target={opensInNewTab(preferredMailClient) ? '_blank' : undefined}
+                rel={opensInNewTab(preferredMailClient) ? 'noreferrer' : undefined}
+              >
+                <ExternalLink />
+                Reply in email app
+              </a>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
         {submission.status !== 'new' ? (
           <DropdownMenuItem onClick={() => setStatus('new')}>
             <Inbox />
@@ -106,27 +111,36 @@ function SubmissionActions({ submission }: { submission: FormSubmissionWithForm 
             Archive
           </DropdownMenuItem>
         ) : null}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onClick={() => onRequestDelete(submission)}>
+          <Trash2 />
+          Delete
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
 }
 
 export function AllSubmissionsPage() {
+  const navigate = useNavigate();
   const { data: submissions, isPending, error, refetch } = useAllSubmissions();
   const { data: forms } = useForms();
   const updateStatus = useUpdateSubmissionStatusGlobal();
+  const deleteSubmission = useDeleteSubmissionGlobal();
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [formFilter, setFormFilter] = useState('all');
-  const [viewing, setViewing] = useState<FormSubmissionWithForm | null>(null);
+  const [hideTest, setHideTest] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<FormSubmissionWithForm | FormSubmissionWithForm[] | null>(null);
 
   const filteredSubmissions = useMemo(() => {
     return (submissions ?? []).filter((submission) => {
       if (statusFilter !== 'all' && submission.status !== statusFilter) return false;
       if (formFilter !== 'all' && submission.formId !== formFilter) return false;
+      if (hideTest && submission.isTest) return false;
       return true;
     });
-  }, [submissions, statusFilter, formFilter]);
+  }, [submissions, statusFilter, formFilter, hideTest]);
 
   async function handleBulkStatus(
     rows: FormSubmissionWithForm[],
@@ -146,6 +160,23 @@ export function AllSubmissionsPage() {
     clearSelection();
   }
 
+  async function handleConfirmDelete() {
+    if (!pendingDelete) return;
+    const targets = Array.isArray(pendingDelete) ? pendingDelete : [pendingDelete];
+
+    const results = await Promise.allSettled(
+      targets.map((submission) => deleteSubmission.mutateAsync({ formId: submission.formId, id: submission.id })),
+    );
+    const failed = results.filter((result) => result.status === 'rejected').length;
+
+    if (failed === 0) {
+      toast.success(targets.length === 1 ? 'Submission deleted' : `${targets.length} submissions deleted`);
+    } else {
+      toast.error(`${failed} of ${targets.length} submissions failed to delete`);
+    }
+    setPendingDelete(null);
+  }
+
   const columns = useMemo<ColumnDef<FormSubmissionWithForm>[]>(
     () => [
       {
@@ -154,10 +185,22 @@ export function AllSubmissionsPage() {
         sortingFn: (rowA, rowB) =>
           new Date(rowA.original.createdAt).getTime() - new Date(rowB.original.createdAt).getTime(),
         cell: ({ row }) => (
-          <button type="button" className="font-medium hover:underline" onClick={() => setViewing(row.original)}>
-            {new Date(row.original.createdAt).toLocaleString()}
-          </button>
+          <span className="font-medium">{new Date(row.original.createdAt).toLocaleString()}</span>
         ),
+      },
+      {
+        id: 'sender',
+        header: 'Submitted by',
+        cell: ({ row }) => {
+          const { name, email } = getSubmissionSender(row.original.data);
+          if (!name && !email) return <span className="text-muted-foreground">—</span>;
+          return (
+            <div className="flex flex-col">
+              {name ? <span className="text-sm">{name}</span> : null}
+              {email ? <span className="text-xs text-muted-foreground">{email}</span> : null}
+            </div>
+          );
+        },
       },
       {
         accessorKey: 'formName',
@@ -171,13 +214,36 @@ export function AllSubmissionsPage() {
       {
         accessorKey: 'status',
         header: 'Status',
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
+        cell: ({ row }) => (
+          <div className="flex items-center gap-1.5">
+            <StatusBadge status={row.original.status} />
+            {row.original.isTest ? <TestSubmissionBadge /> : null}
+          </div>
+        ),
+      },
+      {
+        id: 'attachments',
+        header: '',
+        enableSorting: false,
+        cell: ({ row }) => {
+          const attachments = getSubmissionAttachments(row.original.data);
+          if (attachments.length === 0) return null;
+          return (
+            <span
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+              title={attachments.map((a) => a.filename).join(', ')}
+            >
+              <Paperclip className="size-3.5" />
+              {attachments.length}
+            </span>
+          );
+        },
       },
       {
         id: 'actions',
         header: '',
         enableSorting: false,
-        cell: ({ row }) => <SubmissionActions submission={row.original} />,
+        cell: ({ row }) => <SubmissionActions submission={row.original} onRequestDelete={setPendingDelete} />,
       },
     ],
     [],
@@ -220,6 +286,7 @@ export function AllSubmissionsPage() {
           data={filteredSubmissions}
           searchPlaceholder="Search submissions…"
           onRefresh={() => void refetch()}
+          onRowClick={(row) => navigate(`/forms/${row.formId}/submissions/${row.id}`)}
           enableRowSelection
           toolbar={
             <>
@@ -247,6 +314,13 @@ export function AllSubmissionsPage() {
                   <SelectItem value="archived">Archived</SelectItem>
                 </SelectContent>
               </Select>
+              <Button
+                variant={hideTest ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setHideTest((v) => !v)}
+              >
+                Hide test
+              </Button>
             </>
           }
           bulkActions={(selected, clearSelection) => (
@@ -265,17 +339,41 @@ export function AllSubmissionsPage() {
               >
                 Archive
               </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => {
+                  setPendingDelete(selected);
+                  clearSelection();
+                }}
+              >
+                <Trash2 />
+                Delete
+              </Button>
             </>
           )}
         />
       ) : null}
 
-      <ViewSubmissionDialog
-        submission={viewing}
-        onOpenChange={(open) => {
-          if (!open) setViewing(null);
-        }}
-      />
+      <AlertDialog open={pendingDelete !== null} onOpenChange={(open) => !open && setPendingDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {Array.isArray(pendingDelete) ? `Delete ${pendingDelete.length} submissions?` : 'Delete this submission?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes {Array.isArray(pendingDelete) ? 'these submissions' : 'this submission'}.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void handleConfirmDelete()}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

@@ -232,6 +232,139 @@
       "when": 1788971104671,
       "tag": "0032_talented_outlaw_kid",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1789015141062,
+      "tag": "0033_blue_wilson_fisk",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1789069888904,
+      "tag": "0034_grandfather-verified-users",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1789215426818,
+      "tag": "0035_glorious_wendell_rand",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1789217126584,
+      "tag": "0036_right_stardust",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1789220900373,
+      "tag": "0037_curly_lucky_pierre",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1789224026499,
+      "tag": "0038_faithful_black_knight",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1789244933817,
+      "tag": "0039_nosy_tenebrous",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1789555170362,
+      "tag": "0040_dazzling_union_jack",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1789558576517,
+      "tag": "0041_sweet_toad_men",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1789558762620,
+      "tag": "0042_third_sebastian_shaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1789579326258,
+      "tag": "0043_quick_pepper_potts",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1789656302630,
+      "tag": "0044_tiresome_mandrill",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "6",
+      "when": 1789669027316,
+      "tag": "0045_nifty_taskmaster",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1789675764023,
+      "tag": "0046_sticky_pandemic",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1789793574376,
+      "tag": "0047_dear_synch",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1789806707778,
+      "tag": "0048_overrated_khan",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1789842599743,
+      "tag": "0049_funny_prism",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1789858448981,
+      "tag": "0050_massive_songbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "6",
+      "when": 1789908912513,
+      "tag": "0051_unified_identity",
+      "breakpoints": true
     }
   ]
 }

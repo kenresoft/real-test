@@ -7,6 +7,241 @@ Status: Proposed / Ready for implementation
 
 ## Changelog
 
+**v0.24 (2026-09-20)** — one identity system across the CMS and its plugins. Normal website/
+application users (e.g. Commerce storefront customers) are now plain better-auth `user` rows with the
+new `'none'` role (no CMS access) — the default for every new account, so a public sign-up can never
+confer a CMS role (previously a public sign-up defaulted to `editor`). Only trusted server-side code
+grants a CMS role (bootstrap Owner, Add User, the admin role route, ownership transfer); `role` stays
+`input: false` in better-auth's `additionalFields`. `requireSession` returns 403 for any signed-in
+user without a real CMS role, so every `/admin` and plugin-admin route refuses website users
+server-side. The Owner is invisible to everyone else: absent from the users list and (for non-owners)
+the audit log, and every direct lookup or mutation of the Owner by a non-Owner is an indistinguishable
+404 (`getUserVisibleTo`, `apps/api/src/repositories/users.ts`); Admin/Editor/Viewer are deliberately not
+ranked against each other for visibility. Commerce's own customer accounts, sessions and verification/
+reset tokens were removed (`docs/PLUGINS.md`): migration `0051_unified_identity.sql` turns every legacy
+customer into a core user (same id, same password hash, `none` role), re-points carts/orders/addresses at
+the user id and drops `plugin_commerce_customers`/`_customer_sessions`/`_customer_tokens`. Also fixed:
+a public sign-up for an already-registered email 500'd (the sign-up audit hook wrote an audit row for
+better-auth's synthetic anti-enumeration user, violating the audit_log→user foreign key).
+
+**v0.23 (2026-09-16)** — a security-hardening pass across six areas found in a repository audit,
+plus two focused feature additions. **Secure first-owner bootstrap (P0)**: removed the
+`databaseHooks.user.create.before` hook that granted "owner" to a bare first signup
+(`apps/api/src/lib/auth.ts`) — a fresh installation now starts uninitialized, and the first Owner
+is created only through a one-time bootstrap flow (`POST /api/v1/system/bootstrap/request` then
+`.../bootstrap/complete`, `apps/api/src/routes/system/bootstrap-owner.ts`): a randomly generated,
+SHA-256-hashed, 30-minute token, logged only to this deployment's own server output (never
+returned over HTTP), single-use via a conditional-update-plus-check-returned-rows consumption.
+`examples/astro-site/scripts/seed.mjs` no longer defaults to `owner@example.com`/
+`correct-horse-battery-staple` — it now requires `SEED_OWNER_EMAIL`/`SEED_OWNER_PASSWORD`/
+`SEED_BOOTSTRAP_TOKEN` explicitly and refuses to run otherwise. **Admin CSRF/Origin protection**:
+a new `requireTrustedOrigin()` middleware (`apps/api/src/middleware/require-trusted-origin.ts`,
+mirroring `packages/plugin-ecommerce`'s existing `requireTrustedOriginForMutations`) is applied
+globally to every `/api/v1/admin/*` mutation — a present-but-not-allow-listed `Origin` is
+rejected (403); a missing `Origin` (non-browser clients) passes through; GET/HEAD and every
+non-admin route are unaffected. **Forms/Submissions RBAC**: a new `requireFormsAccess()`
+middleware (`apps/api/src/middleware/require-forms-access.ts`) applied to every route in
+`routes/admin/forms.ts` and `routes/admin/submissions.ts` — Owner/Admin/Editor get full
+read+editorial access, Viewer keeps read-only, and Author now gets **no** Forms/Submissions
+access at all (not even read), matching the documented model below rather than the Entries-style
+role floor those routes previously (and incorrectly) inherited by having no gate at all.
+**Submission reply stored XSS**: replies' `bodyHtml` is now sanitized server-side before it's
+ever sent or persisted (`apps/api/src/lib/html-sanitizer.ts`) — a small dependency-free,
+quote-aware tokenizer (a `sanitize-html`/`htmlparser2` first attempt failed under
+`@cloudflare/vitest-pool-workers`' own module loader) enforcing a strict tag/attribute allow-list
+and rejecting `javascript:`/`data:`/`vbscript:` (and any other non-http(s)/mailto) hrefs. **Site
+Builder URL safety**: a new shared `safeUrlSchema()` (`packages/contracts/schemas/safe-url.ts`)
+applied to every block/link URL field found in the audit — Hero's `ctaUrl`, CTA's `buttonUrl`,
+and Structured Settings' social/navigation/footer link URLs — allowing relative paths and
+http(s)/mailto while rejecting `javascript:`/`data:`/`vbscript:`/protocol-relative URLs at the
+contract boundary, not only in the Admin UI. **Webhook egress hardening (SSRF)**: a new
+`apps/api/src/lib/ssrf-guard.ts` blocks loopback/RFC1918/link-local (including the
+169.254.169.254 cloud metadata address)/multicast/unspecified/reserved destinations by default,
+both at webhook create/update time and again immediately before every dispatch attempt (defense
+in depth against a destination whose meaning changed since creation); a new per-webhook
+`allowPrivateDestinations` column (default `false`, additive) is the explicit opt-in for a
+deployment that deliberately needs an internal target. `lib/webhooks.ts`'s delivery path also
+gained a 10s timeout (`AbortController`), manual redirect handling (`redirect: 'manual'`, each
+hop re-validated against the same SSRF guard, capped at 3 hops), and a bounded response-body
+read (1KB) so a subscriber can't hold the Worker invocation open indefinitely.
+
+Two focused feature additions, reviewed against the existing media/entries/reusable-blocks/
+contracts/API/admin/Astro architecture before implementation. **Media folders**: a new
+`media_folders` table (flat, non-nested by design) and a nullable `media.folderId`
+(`onDelete: 'set null'` — deleting a folder never deletes or orphans its files, they simply
+become unfiled again; every pre-existing media row keeps working unmodified with `folderId:
+null`). Admin CRUD (`/api/v1/admin/media-folders`) plus a move-multiple-items endpoint
+(`POST /api/v1/admin/media/move`); the Media Library and Media Picker both gained a folder
+filter, and the Library gained a folder-management dialog and bulk move. A new
+`GET /api/v1/public/media/folders/{slug}` lets a frontend fetch a named collection (e.g.
+"home-page-hero") explicitly rather than guessing at ids from the flat library, edge-cached and
+invalidated the same way `public-cache.ts`'s other domains are; `@kenresoft-cms/astro` gained
+`media.byFolder({slug})`.
+
+One real bug found and fixed during implementation, not hypothetical: drizzle-kit's generated
+migration for the new `media.folder_id` column (`ALTER TABLE media ADD folder_id text REFERENCES
+media_folders(id)`) silently omitted the `ON DELETE SET NULL` clause the schema itself declares
+— a real limitation of `ALTER TABLE ADD COLUMN` migration generation, not a hand-authoring
+mistake — confirmed by a real D1 test (deleting a folder with media in it 500'd on the FK
+constraint instead of setting `folder_id` to null). Fixed by hand-editing the generated
+migration SQL to add the clause explicitly before it was ever applied anywhere.
+
+Verified: `pnpm typecheck`/`pnpm lint` clean workspace-wide; new regression tests for every one
+of the six security fixes (`installation-bootstrap.test.ts`, `admin-origin-check.test.ts`,
+`forms-rbac.test.ts`, the XSS case added to `forms-routes.test.ts`, `site-builder-url-
+safety.test.ts`, `webhook-ssrf.test.ts`) and the media-folders feature addition (`media-folders-
+routes.test.ts`), plus the pre-existing suite re-run to confirm no
+regressions — see this repo's own PR/commit history for the exact pass/fail counts at the time
+of this change, since a live count would go stale here immediately.
+
+**v0.22 (2026-09-14)** — a production hardening pass over the schema-driven frontend/
+site-builder initiative (Phase 10's hardening half, `docs/SITE_BUILDER.md` §25; the
+"patterns/presets" half and Phase 9's plugin-contributed block types both stay deliberately
+not started, per §9's own explicit deferral and direct user sign-off). Found and fixed a real,
+previously-undiscovered data-loss bug spanning four update schemas
+(`updateReusableBlockSchema`, `updateTemplateSchema`, `updateFieldDefinitionSchema`,
+`updateFormFieldSchema`): each was derived via `createXSchema.partial()`, which widens a
+field's type to optional but does not strip an already-present `.default(...)` on the base
+schema — so a PATCH genuinely omitting that one field still silently wrote the default (`{}`,
+`[]`, or `false`) over real data. Never visible in the shipped admin UI (every caller already
+resends full payloads), but a real defect for any other caller sending a genuinely partial
+update. Fixed by replacing all four with hand-written schemas (no `.default()`, matching
+`updatePageSchema`'s already-correct pattern); every other `.partial()` use in the workspace was
+audited and confirmed unaffected. A second, smaller gap closed in the same pass: reusable
+blocks' `config` is now validated against its own block type's schema
+(`BLOCK_CONFIG_SCHEMAS`), matching what Pages/Templates already enforce. See
+`docs/SITE_BUILDER.md` §25 for the full implementation record.
+
+**v0.21 (2026-09-14)** — Phase 8 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): `BlockTreeEditor.tsx`'s editing UI gained drag-and-drop reordering
+(dnd-kit, mirroring `ContentTypeDetailPage.tsx`'s existing field-reorder pattern), duplicate,
+and undo/redo, replacing Phase 3's button-based add/remove/reorder UI. Per §14 decision #3's
+own requirement, the underlying `(blocks, onChange)` controlled-component contract and the
+Page/Block data model are completely unchanged — this is `apps/admin` editing-UI code only, no
+API/contract/database change. Every page composing a block tree (Page Editor, Templates) gains
+the new UI automatically, since both already delegate to the one shared `BlockTreeEditor`
+component. See `docs/SITE_BUILDER.md` §24 for the full implementation record.
+
+**v0.20 (2026-09-14)** — Phase 7 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): real rendering of a Page's block tree, closing §6.5's "not yet
+rendered by a frontend" gap. Deliberately deviates from this document's own original Phase 7
+sketch (SDK-shipped `<PageRenderer>`/`<BlockRenderer>` components): `@kenresoft-cms/astro`
+stays framework-agnostic (Phase 1's own established design principle) and gained only
+`resolveSiteRoute()` (layers an exact-match Page-route check on top of Phase 2's unchanged
+`resolveRoute()`) and a developer-override-only block-renderer registry
+(`registerBlockRenderer()`/`resolveBlockRenderer()`); the actual Astro components and the
+`examples/astro-site` catch-all route (`[...route].astro`) live in the example site itself. A
+new `GET /api/v1/public/reusable-blocks/:id` route closes a previously-undiscovered gap: a
+`reusableBlockRef` block needs its referenced block's live type/config at render time, and no
+public route for reusable blocks existed until now. A real test-infrastructure bug was found and
+fixed verifying this route's own test file: an unread `SELF.fetch()` response body left the
+cache middleware's `ctx.waitUntil(cache.put(...))` background write hanging under
+`@cloudflare/vitest-pool-workers` — the same class of gotcha `public-media-routes.test.ts`'s own
+comment already names, just not yet hit by this new file. No breaking changes — every addition
+is purely additive, and `resolveRoute()`'s existing signature/behavior is untouched. See
+`docs/SITE_BUILDER.md` §23 for the full implementation record.
+
+**v0.19 (2026-09-12)** — Phase 6 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): Navigation `pageId` reference option. `navigationItemSchema`
+(Structured Settings' `navigation` module, §6.2) is now a `z.union()` accepting either a literal
+`url` or a `pageId` referencing a Page — a contracts/UI/SDK change only, no database migration.
+The admin Navigation section gained a URL/Page target-type selector; `@kenresoft-cms/astro`
+gained a pure `resolveNavigationItems()` helper (resolves a `pageId` to that Page's `route`,
+`null` for a dangling reference) and a `client.pages.list()` wrapper. No breaking changes —
+every existing `url`-only navigation item keeps validating and rendering unmodified. See
+`docs/SITE_BUILDER.md` §22 for the full implementation record.
+
+**v0.18 (2026-09-12)** — Phase 5 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): Page Live Preview, reusing `preview-token.ts` completely unmodified —
+a new `GET /api/v1/admin/pages/:id/preview-token` and a new `GET /api/v1/public/preview/pages
+?route=...&token=...` route (mirroring the existing entry-preview pair exactly), a new
+`settings.pagePreviewUrl` template column (a Page has no content-type/slug pair, only a literal
+`route`, so it needs its own placeholder shape rather than overloading `previewUrl`), and a
+"Live Preview" button on the Page Editor. Ships the complete backend/admin-UI half of the
+feature — opening a preview link only renders something once a frontend implements Page
+rendering at all (Phase 7), which this phase's docs say plainly rather than implying otherwise.
+See `docs/SITE_BUILDER.md` §21 for the full implementation record.
+
+**v0.17 (2026-09-12)** — Phase 4 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): `reusable_blocks` (a live reference, resolved — never copied — at
+render time, referenced from a Page's tree via the new `reusableBlockRef` block type) and
+`templates` (a default block composition, copied once into a new Page — never live-linked) with
+full admin CRUD (§6.6), a `pages.templateId` bookkeeping column, and Page creation from a
+template in the admin UI. Updating or deleting a reusable block conservatively purges the entire
+Pages cache namespace, since there's no cheap way yet to know which pages embed a given one.
+Additive/backward-compatible only — no Page preview, Navigation page references, or Astro
+rendering yet; see `docs/SITE_BUILDER.md` §20 for the full implementation record.
+
+**v0.16 (2026-09-12)** — Phase 3 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): the `pages`/`page_revisions` tables (§6.5), admin Pages CRUD with
+revision history/restore, a small code-defined built-in block set (Hero, RichText, Image, CTA,
+Columns, Spacer) with per-type config validation, a basic add/remove/reorder block-composition
+editor (buttons, not drag-and-drop — Phase 8), the public `GET /api/v1/public/pages`/`GET
+/api/v1/public/pages/by-route` routes (same draft-is-nonexistent convention as Entries), and
+route-collision checks in both directions between Pages and content-type route patterns.
+Additive/backward-compatible only — no Templates, Reusable Blocks, Page preview, or a wired-up
+Astro rendering side yet; see `docs/SITE_BUILDER.md` §19 for the full implementation record and
+remaining phases.
+
+**v0.15 (2026-09-12)** — Phase 2 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): a nullable `content_types.routePattern` column (§6.4) supporting
+exactly one required `{slug}` parameter (e.g. `/blog/{slug}`), a new deliberately narrow
+public endpoint `GET /api/v1/public/route-patterns`, and `resolveRoute()`/`matchRoutePattern()`
+in `@kenresoft-cms/astro` (`integrations/astro/src/render/resolve-route.ts`). Additive/
+backward-compatible only — still no Pages, Blocks, Templates, or a wired-up generic Astro
+catch-all route; see `docs/SITE_BUILDER.md` for the full plan and remaining phases.
+
+**v0.14 (2026-09-12)** — Phase 1 of the schema-driven frontend/site-builder initiative
+(`docs/SITE_BUILDER.md`): a nullable `field_definitions.presentation` column (§6.3) and a
+read-only field-renderer registry in `@kenresoft-cms/astro`
+(`integrations/astro/src/render/field-renderers.ts`), plus a light refactor of
+`apps/admin/src/components/field-input.tsx`'s field-type dispatch into an explicit registry
+object (no behavior change). Additive/backward-compatible only — no Pages, Blocks, Templates,
+or dynamic routing yet; see `docs/SITE_BUILDER.md` for the full plan and remaining phases.
+
+**v0.13 (2026-09-10)** — Closes a real security gap: a staff account created via
+`Admin → Users → Add user` (or via public self-signup) could sign in with its temporary/chosen
+password without ever proving ownership of the email address — `user.emailVerified` existed in
+the schema but was never read or written anywhere. Fixed at the authentication layer itself,
+using better-auth 1.7.2's own native `emailVerification`/`emailAndPassword.requireEmailVerification`
+support (`apps/api/src/lib/auth-options.ts`, `apps/api/src/lib/auth.ts`) rather than a second
+hand-rolled token system — better-auth signs a stateless HS256 JWT with `BETTER_AUTH_SECRET`
+(verified via `jose`), so no new token-storage table was needed, and the resend/verify HTTP
+endpoints (`POST /api/v1/auth/send-verification-email`, `GET /api/v1/auth/verify-email`) come
+from better-auth itself, already covered by the existing `AUTH_RATE_LIMITER`. Delivery reuses the
+existing pluggable email layer (`apps/api/src/lib/email`) — the verification-email callback
+builds its own link (`${ADMIN_URL ?? CORS_ORIGINS[0]}/verify-email?token=...`, the same
+construction pattern `password-reset.ts` already used) pointing at a new Admin SPA page
+(`apps/admin/src/pages/VerifyEmailPage.tsx`, route `/verify-email`) that consumes the token
+itself and renders a real success/failure UI, rather than relying on better-auth's own
+API-hosted redirect flow. `advanced.backgroundTasks` wires better-auth's internal
+`runInBackgroundOrAwait` hook to `ExecutionContext.waitUntil` so a verification-email send never
+blocks the response.
+
+Deliberate policy: **no bootstrap-owner exception** — the very first (owner) signup on a fresh
+deployment goes through the identical unverified-until-verified gate as any other account. This
+was reconsidered from an earlier draft that auto-verified the bootstrap row; the final design
+instead relies on the pre-existing "noop sender logs what it would send" behavior
+(`apps/api/src/lib/email/noop.ts`) — an operator deploying their own fresh Worker can read their
+own verification link from the Worker's logs (`wrangler tail`, or the local `wrangler dev`
+terminal) even with zero email configured, so this creates no "impossible deployment state."
+A new one-time migration (`packages/database/migrations/0034_grandfather-verified-users.sql`,
+`UPDATE user SET email_verified = 1 WHERE email_verified = 0`) grandfathers every account that
+existed before this change shipped, so no existing deployment's users are locked out by the new
+requirement — confirmed that `pnpm run update` applies migrations before redeploying, so this
+runs before the new gate can ever affect pre-existing data.
+
+`GET /api/v1/system/status`'s `emailConfigured` flag (`apps/api/src/routes/system/recover-owner.ts`)
+was tightened to check the full required config per provider (`RESEND_API_KEY`+`EMAIL_FROM`, or
+the `EMAIL` binding+`EMAIL_FROM`), not just that `EMAIL_PROVIDER` has a recognized value — it
+previously reported "configured" even when the provider's own sender would throw at send time.
+Known technical debt, not solved here: Add User's separate onboarding email still delivers the
+temporary password itself in plaintext, rather than a claim-link flow — kept in scope reduction,
+flagged in `apps/api/src/routes/admin/users.ts` for a future pass. A new
+`apps/api/src/lib/email/test.ts` (`EMAIL_PROVIDER=test` in `apps/api/wrangler.test.toml`) gives
+the test suite its first real email-content capture point, since better-auth's stateless JWT
+token can't be read out of a DB table the way password-reset's own token already was.
+
 **v0.12 (2026-09-09)** — Adds **Structured Settings** (§6.2), a third configuration primitive
 alongside Content Types/Entries and Global Variables — prompted by a real production website
 migration that exposed Global Variables being stretched to cover structured, typed site
@@ -235,7 +470,7 @@ of by convention.
   Reusability is preserved at the codebase level (fork/redeploy the same open-source project
   to a new Cloudflare account per site) rather than at the running-instance level. The
   `Setting` entity added in v0.4 is renamed `Settings` and is now a **singleton per
-  deployment** (name, contact email, social links, CORS origin, feature flags) rather than
+  deployment** (name, contact email, social links, feature flags) rather than
   scoped to a project, since there is no longer a project to scope it to.
 - **Deployment model (§11)**, retitled from "Multi-Client / Multi-Tenant Strategy" to
   "Deployment Model: Single Site Per Instance" — now documents the single-site-per-instance
@@ -517,7 +752,7 @@ kenresoft-cms/
 
 | Entity | Purpose |
 |---|---|
-| Settings | Singleton per-deployment **operational** configuration (deployment identity name, CORS origin, feature flags, Live Preview URL template) — never exposed to the public API. Used to also carry `contactEmail`/`socialLinks`; both were removed once Global Variables, and later Structured Settings, gave that kind of data a real home (see §6.2/Changelog). |
+| Settings | Singleton per-deployment **operational** configuration (deployment identity name, feature flags, Live Preview URL template) — never exposed to the public API. Used to also carry `contactEmail`/`socialLinks`; both were removed once Global Variables, and later Structured Settings, gave that kind of data a real home (see §6.2/Changelog). |
 | StructuredSettings | Singleton, typed, schema-validated **site** configuration — one row per module (`general`/`contact`/`social`/`navigation`/`footer`/`seo`), each validated against its own Zod schema (`packages/contracts/schemas/structured-settings.ts`). Publicly readable per module at `GET /api/v1/public/settings/:module` (§6.2). |
 | GlobalVariable | Generic, arbitrary key/value configuration with no fixed schema — feature flags, plugin/app variables, and anything genuinely schema-less. Publicly readable as a flat map at `GET /api/v1/public/global-variables`. Not the home for structured site content once a Structured Settings module exists for it (§6.2). |
 | User | Administrative identity |
@@ -549,7 +784,7 @@ one for a given value is the mistake this section exists to prevent:
   application-specific and doesn't justify a stable schema — a feature flag, a one-off custom
   value a specific deployment needs that isn't part of any Structured Settings module.
 - **Use the CMS-internal `Settings` singleton** only for deployment-*operational* configuration
-  that the admin itself needs to function (its own display name, CORS origin, feature flags,
+  that the admin itself needs to function (its own display name, feature flags,
   the Live Preview URL template) — never for anything a public frontend renders. This table
   briefly also carried `contactEmail`/`socialLinks`, removed once this distinction existed to
   hold them properly instead.
@@ -557,6 +792,226 @@ one for a given value is the mistake this section exists to prevent:
 A value migrating from Global Variables into a new Structured Settings module (as `contact`/
 `social`/`footer` did, §16) is expected as the CMS's schema-worthy configuration surface grows —
 Global Variables remains the correct home for anything that never earns a stable schema.
+
+### 6.3 Field presentation metadata (schema-driven frontend, Phase 1)
+
+**Status: implemented.** `field_definitions` has a nullable `presentation` JSON column
+(migration `0035_glorious_wendell_rand.sql`), deliberately kept separate from `fieldType`,
+`required`, and `config` — those three describe the field's *data shape and validation*;
+`presentation` describes only how a value is *displayed*, and is never consulted by
+validation, storage, or the admin field-editing form itself. A field with `presentation:
+null` (every field created before this change, and any created without setting it) renders
+exactly as it always has.
+
+`presentation` is an optional object of plain strings (`renderer`, `format`, `label`,
+`displayMode`, `variant`, `alignment`), validated by `fieldPresentationSchema`
+(`packages/contracts/schemas/field-definitions.ts`) with `.strict()` so an unrecognized key is
+rejected at write time rather than silently ignored. `renderer` is the one field a frontend
+consults today: `@kenresoft-cms/astro`'s `resolveFieldRenderer()` (`integrations/astro/src/
+render/field-renderers.ts`) resolves it, in order, against (1) a developer-registered
+renderer under that name, (2) the built-in default renderer for the field's `fieldType`, then
+(3) a safe stringifying fallback — never code execution: a renderer name is only ever a `Map`
+lookup key into a registry of already-compiled, developer-registered functions, so an admin
+entering an arbitrary string as `presentation.renderer` can at most cause a fallback to the
+default renderer, never arbitrary behavior. See `docs/ASTRO.md`'s "Field rendering (Phase 1)"
+section for the full renderer API and precedence rules.
+
+This is Phase 1 of the larger schema-driven-frontend/site-builder initiative tracked in
+`docs/SITE_BUILDER.md` — that document is the architecture plan for Pages, Blocks, Templates,
+and dynamic routing; **none of those exist yet**. Phase 1 only establishes the field-level
+renderer-registry foundation those later phases will build on. There is not yet a public API
+endpoint exposing a content type's field definitions (including `presentation`) to a
+frontend — `docs/ASTRO.md`'s Known limitations already flags the absence of a public content-
+type-metadata endpoint; this phase doesn't change that, it only makes the renderer registry
+itself ready to consume field descriptors once such an endpoint (or a future Page/Block
+system) supplies them.
+
+### 6.4 Dynamic content routing (schema-driven frontend, Phase 2)
+
+**Status: implemented.** A content type can declare a nullable `routePattern` column (e.g.
+`/blog/{slug}`, migration `0036_right_stardust.sql`) so a frontend's route resolver can
+recognize a URL as belonging to that content type without a developer hardcoding a route for
+it. V1 supports **exactly one required `{slug}` parameter and nothing richer** — no multiple
+parameters, optional segments, wildcards, regex, or localization segments (a deliberate,
+resolved decision, `docs/SITE_BUILDER.md` §14 decision #2) — validated by
+`routePatternSchema` (`packages/contracts/schemas/routing.ts`): leading slash, lowercase
+alphanumeric-and-hyphen literal segments only, `{slug}` as the pattern's final segment
+(satisfying "no trailing slash" by construction), no reserved first segment
+(`RESERVED_ROUTE_PREFIXES`: `api`, `admin`), and no duplicate pattern across content types
+(enforced both at the API layer, for a clear 400, and by a DB unique index as defense-in-
+depth — a unique index over a nullable column allows any number of `NULL`s, so content types
+with no route of their own never collide with each other).
+
+A new, deliberately narrow public endpoint, `GET /api/v1/public/route-patterns`, exposes only
+`{contentTypeSlug, routePattern}` pairs — **this is explicitly not the "public content-type
+metadata" endpoint** flagged as an unresolved product decision in `docs/ASTRO.md`'s Known
+limitations (that question is about exposing a content type's *field definitions*, which
+would reveal internal content-modeling structure; a route pattern reveals only a URL shape a
+visitor could already discover by requesting the page). Edge-cached and invalidated the same
+way `global-variables` is (`invalidatePublicRoutePatternsCache()`,
+`apps/api/src/lib/public-cache.ts`).
+
+`@kenresoft-cms/astro`'s `resolveRoute(pathname, patterns)`/`matchRoutePattern(pattern,
+pathname)` (`integrations/astro/src/render/resolve-route.ts`) are pure functions — given the
+patterns from `client.routePatterns.list()`, they resolve a pathname to
+`{kind: 'entry', contentTypeSlug, slug}` or `{kind: 'notFound'}`. The result type is a
+discriminated union specifically so a `page` variant can be added later (Phase 3+) without
+breaking existing callers. Resolution is deterministic regardless of pattern array order,
+since the server-side uniqueness constraint above guarantees at most one pattern can ever
+match a given pathname.
+
+**What this does not do yet**: no Pages exist (Phase 3+, not started), and `examples/astro-
+site` has not been wired to use `resolveRoute()` — the SDK primitive is built and unit-tested
+(`integrations/astro/test/resolve-route.test.ts`) as a foundation, the same scope discipline
+Phase 1 applied to `renderField()`. See `docs/SITE_BUILDER.md` §17 for the full Phase 2
+implementation record.
+
+### 6.5 Pages and Blocks (schema-driven frontend, Phase 3)
+
+**Status: implemented (data model, admin, public API) — not yet rendered by a frontend.** A
+Page (`pages` table) is a routed, block-composed unit distinct from Entries: `route` (a literal
+path like `/about` or `/services/design` — no `{slug}` parameter, unlike a content type's
+`routePattern`), `title`, `status`/`publishAt` (reusing `ENTRY_STATUSES` and the existing
+scheduled-publish sweep verbatim), a `blocks` JSON tree, and an optional page-scoped `seo`
+override. `page_revisions` is a structural mirror of `entry_revisions` — every write snapshots
+the pre-write state first, so restore is always available (`GET`/`POST .../revisions/
+{id}/restore`).
+
+**Blocks are code-defined, not admin-definable** (`packages/contracts/schemas/blocks.ts`,
+`BLOCK_TYPES`: `hero`, `richText`, `image`, `cta`, `columns`, `spacer`) — an admin can configure
+an *instance* of a registered block type, never introduce a new one, which is the direct answer
+to "a block's behavior is trusted code, its content is admin-authored data" (mirrors the same
+trust boundary rich-text's `dangerouslySetInnerHTML`/`set:html` already establishes). Each
+block type has its own Zod config schema, validated server-side (`validateBlockTree()`) in
+addition to the envelope shape `blockInstanceSchema` checks. The tree is deliberately **capped
+at two tiers** (a block, and that block's own non-nesting children) rather than a true
+recursive structure — `@hono/zod-openapi`'s document generator cannot serialize a
+self-referential `z.lazy()` schema from a plain (non-`@hono/zod-openapi`) zod instance without
+infinitely expanding it, confirmed empirically when the OpenAPI doc route crashed outright with
+the first, fully-recursive version of this schema. Only `columns` (§ container block types)
+carries `children`; every other built-in type is a leaf. This is a scope narrowing forced by a
+real tooling constraint, not a design preference — revisit if a future block type genuinely
+needs deeper nesting.
+
+**Route-collision checks run in both directions** at write time: creating/renaming a Page
+checks every content type's `routePattern` for a shape match against the literal route
+(`doesRoutePatternMatchLiteralRoute()`, `packages/contracts/schemas/routing.ts` — segment
+counts must match, with `{slug}` matching any literal segment), and setting a content type's
+`routePattern` checks every existing Page's route the same way. Either direction 400s on a
+match, keeping route resolution deterministic once a frontend needs to choose between "is this
+a Page or a content-type entry" (Phase 7).
+
+Admin routes (`/api/v1/admin/pages`) are gated `admin`/`editor` — the same floor as content-type
+field management, since a Page's composition is closer to structure than day-to-day entry
+editing. Public routes (`GET /api/v1/public/pages` — id/route/title only, never the full block
+tree; `GET /api/v1/public/pages/by-route?route=...` — a query param, not a path param, since a
+route can contain slashes that would otherwise compete with the content-type catch-all's own
+wildcard) reuse the exact draft-is-nonexistent 404 convention `routes/public/content.ts`
+established, edge-cached and invalidated (`invalidatePublicPageCache()`,
+`apps/api/src/lib/public-cache.ts`) the same way.
+
+The admin editor (`apps/admin/src/pages/PageEditorPage.tsx`,
+`apps/admin/src/pages/blocks/BlockTreeEditor.tsx`) now supports drag-and-drop reordering,
+duplicate, and undo/redo (Phase 8, §6.5.4) — per `docs/SITE_BUILDER.md` §14 decision #3, this
+replaced only the editing UI itself, never the underlying block-tree data model or rendering
+architecture.
+
+A Page can be created and composed in the admin UI, previewed (§6.5.1, Phase 5), linked to from
+Navigation (§6.5.2, Phase 6), fetched via the public API, and — as of Phase 7 (§6.5.3) — rendered
+as an actual web page by `examples/astro-site`. See `docs/SITE_BUILDER.md` §19 for the full
+Phase 3 implementation record.
+
+#### 6.5.1 Page Live Preview (Phase 5)
+
+**Status: implemented.** `preview-token.ts` (§1.3) needed zero changes — its signing/
+verification pair was already id-agnostic despite an internal field literally named `entryId`.
+`GET /api/v1/admin/pages/:id/preview-token` and `GET /api/v1/public/preview/pages?route=...
+&token=...` mirror the equivalent entry-preview routes exactly, including the same
+"any failure collapses to one 404" convention. A new `settings.pagePreviewUrl` template
+(distinct from `previewUrl`, since a Page has only a literal `route`, not a content-type/slug
+pair) backs a "Live Preview" button on the Page Editor. Honestly incomplete on its own: opening
+a preview link renders nothing until a frontend actually implements Page rendering at all
+(Phase 7) — this phase ships the complete backend/admin-UI half only. See
+`docs/SITE_BUILDER.md` §21 for the full implementation record.
+
+#### 6.5.2 Navigation `pageId` reference (Phase 6)
+
+**Status: implemented.** Structured Settings' `navigation` module (§6.2) accepts either a
+literal `url` or a `pageId` referencing a Page — `navigationItemSchema` is a `z.union()` of two
+shapes sharing common fields (`label`/`visible`/`order`/`external`/`newTab`), one requiring
+`url`, the other `pageId`; a nav item can never carry both or neither, enforced structurally by
+the schema rather than by convention. No database migration — `structured_settings.data` is
+already a JSON blob. A frontend resolves a `pageId` to that Page's `route` via the new
+`resolveNavigationItems()` pure helper in `@kenresoft-cms/astro`, paired with a new
+`client.pages.list()` wrapper over the existing `GET /api/v1/public/pages`; a `pageId` with no
+matching page (the Page was deleted after the nav item referenced it) resolves to `href: null`
+rather than throwing. See `docs/SITE_BUILDER.md` §22 for the full implementation record.
+
+#### 6.5.3 Astro rendering (Phase 7)
+
+**Status: implemented.** `resolveSiteRoute(pathname, pages, patterns)`
+(`integrations/astro/src/render/resolve-route.ts`) resolves an incoming request path to a Page
+(exact-match on `route`), an entry (via the existing, unchanged Phase 2 `resolveRoute()`), or
+`notFound`. `@kenresoft-cms/astro` deliberately stays framework-agnostic (Phase 1's
+`field-renderers.ts` established this precedent) — it exposes only a developer-override block-
+renderer registry (`registerBlockRenderer()`/`resolveBlockRenderer()`, holding overrides in a
+map separate from an app's own built-in map so an explicit override always wins regardless of
+import order, per §6's requirement), never real Astro components. The actual rendering lives in
+`examples/astro-site`: `<PageRenderer>`/`<BlockRenderer>` and one component per built-in block
+type (`HeroBlock`, `RichTextBlock`, `ImageBlock`, `CtaBlock`, `ColumnsBlock`, `SpacerBlock`), a
+`BUILT_IN_BLOCKS` map checked only after `resolveBlockRenderer()` finds no override, and a
+`[...route].astro` catch-all that 404s on `notFound`, renders a Page match, and deliberately
+still 404s on an `entry` match (this example already has purpose-built per-content-type
+templates, so generic entry rendering would double-render). Astro's own routing precedence
+(static/named routes always win over a rest-parameter catch-all) means this addition can't break
+any existing hand-authored page; the one caveat — a Page at a route colliding with an existing
+static file is silently unreachable — is documented, not silently accepted.
+
+A `reusableBlockRef` block (§6.6) is resolved by `BlockRenderer.astro` fetching the referenced
+block's current type/config through a new `GET /api/v1/public/reusable-blocks/:id` route
+(edge-cached, invalidated on write) — closing a gap no earlier phase had needed to close, since
+only admin-authenticated CRUD for reusable blocks existed before. See `docs/SITE_BUILDER.md` §23
+for the full implementation record.
+
+#### 6.5.4 Drag-and-drop block editor (Phase 8)
+
+**Status: implemented.** `BlockTreeEditor.tsx` (the shared component `PageEditorPage.tsx` and
+`TemplatesPage.tsx` both compose a block tree through) gained drag-and-drop reordering via
+dnd-kit — one `DndContext` wraps the whole tree, with an independent `SortableContext` for
+top-level blocks and another per container block's own children; a dragged block never moves
+between the two, matching the two-tier nesting cap (§6.5) that already forbids that shape.
+Duplicate deep-clones a block (and, if it has one, its children) with fresh ids, inserted
+directly after the original. Undo/redo is a `history`/`future` snapshot stack owned entirely
+inside `BlockTreeEditor`, scoped to the current editing session — every mutation funnels
+through one `emitChange()` so the component's `(blocks, onChange)` contract to its parent is
+unchanged. No API, contract, or database change. See `docs/SITE_BUILDER.md` §24 for the full
+implementation record.
+
+### 6.6 Reusable Blocks and Templates (schema-driven frontend, Phase 4)
+
+**Status: implemented.** Two related but distinct mechanisms for reusing block content, both
+admin-editable data (§3.4/§3.5) rather than a separate "theme" concept:
+
+- **Reusable Blocks** (`reusable_blocks` table) are a *live reference* — a Page embeds one via a
+  `{type: "reusableBlockRef", config: {reusableBlockId}}` node in its own block tree (a new leaf
+  `BLOCK_TYPES` entry), and editing the reusable block updates every page embedding it
+  immediately, since nothing is ever copied. A `reusable_blocks` row's own `type` is restricted
+  to leaf, non-container, non-referencing block types (`REUSABLE_BLOCK_TYPES`) — never
+  `columns` (this table has no column to hold children) and never `reusableBlockRef` itself (no
+  reference chains). The cost of the live-reference model: updating or deleting one
+  conservatively purges the *entire* Pages public-cache namespace (queued through the existing
+  `cache_purge_jobs` mechanism, §12), since there's no cheap way yet to know which pages
+  actually embed a given block — accepted as correctness-over-precision, matching how rarely
+  reusable-block edits are expected relative to page edits.
+- **Templates** (`templates` table) are the opposite: a default block composition **copied
+  once** into a new Page at creation time (`pages.templateId` records which template, purely as
+  bookkeeping — never a live link), optionally scoped to one content type
+  (`contentTypeId`, nullable = general-purpose) with an `isDefault` flag for future
+  auto-selection. Editing a template afterward has zero effect on pages already created from it.
+
+Both ship with straightforward admin CRUD (`admin`/`editor` gated, matching Pages) and no
+revision history — neither has the same "point-in-time published state" concept a Page or Entry
+does. See `docs/SITE_BUILDER.md` §20 for the full Phase 4 implementation record.
 
 ### 6.1 Initial content field types
 
@@ -700,8 +1155,13 @@ every check the ones below it satisfy (`ROLE_RANK`/`roleAtLeast()` in
   actions: no Admin can demote, delete, or disable the Owner, and role/ownership changes to or
   from Owner only ever happen through the dedicated ownership-transfer flow, never the general
   role-change route. Represents ownership of *this specific installation* — not a Kenresoft or
-  any other external account (§11 restates why no such account exists). The first person to
-  sign up on a deployment becomes its Owner.
+  any other external account (§11 restates why no such account exists). A fresh installation
+  starts with no Owner and no users at all; ordinary public signup can never claim the role.
+  The Owner is created exactly once through a one-time installation bootstrap
+  (`POST /api/v1/system/bootstrap/request` then `.../bootstrap/complete`, see the Changelog's
+  "Secure first-owner bootstrap" entry) — a randomly generated, hashed, 30-minute token that's
+  logged only to this deployment's own server output, never returned over HTTP or hardcoded
+  anywhere.
 - **Admin** — everything: structure (content types, forms, their fields), users and roles
   (except touching the Owner), settings, cache purge, plus everything Editor and Author can do.
 - **Editor** — any entry (not just their own), form submission triage, media, and
@@ -821,6 +1281,27 @@ caching of anonymous GET responses, with Cloudflare Workers KV as a read-through
 cross-colo consistency or a longer TTL than the Cache API provides is needed. Cache entries
 are invalidated on publish/unpublish (§13) rather than left to expire blindly, so editors see
 their changes reflected promptly instead of waiting out a TTL.
+
+**Bounded, resumable cache-purge queue.** A single Worker invocation has a hard cap on the
+number of subrequests it may make — `cache.delete()` counts against this the same as `fetch()`
+— 50 per invocation on Cloudflare's Free plan, 10,000+ on Paid. A single entry/media write only
+ever needs 1–2 cache-key deletes and stays a direct, synchronous call, but three call sites need
+an unbounded number of them: the manual "Purge Cache" admin action (one list-key per content
+type plus one detail-key per published entry plus one per media file), a bulk entry import (file
+size is caller-controlled), and the scheduled auto-publish sweep (however many entries have a
+due `publishAt` in one 5-minute tick). All three enqueue their cache keys into a `cache_purge_
+jobs` D1 table instead of invalidating them all in one `Promise.all()` — `apps/api/src/lib/
+cache-purge.ts`'s `processCachePurgeJobBatch()` then drains a fixed, conservative batch
+(`CACHE_PURGE_BATCH_SIZE`, currently 25 — comfortably under the Free-plan cap regardless of
+which plan a given deployment is actually on, since the queue's correctness doesn't depend on
+knowing) per call: once synchronously from whichever route enqueued the job (so a normal-sized
+catalog finishes in that same request), and once more per tick from the existing 5-minute Cron
+Trigger (`index.ts`'s `scheduled` handler) to keep draining anything left over. A job's `cursor`
+column makes this resumable by construction — re-running a batch that already ran (say, after a
+mid-batch throw) is always safe, since deleting an already-deleted or never-cached key is a
+harmless no-op. This is a bounded-batching architecture, not a Free-vs-Paid code path: nothing
+here ever checks which plan a deployment is on, and a Paid deployment gets faster convergence
+purely by raising the one `CACHE_PURGE_BATCH_SIZE` constant, never by a different mechanism.
 
 ---
 

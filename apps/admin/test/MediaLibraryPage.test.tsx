@@ -20,6 +20,18 @@ vi.mock('@/lib/api-client', async () => {
   };
 });
 
+// Without this, MediaLibraryPage's real developer-mode.ts hook mounts better-auth's actual
+// authClient.useSession() — a real nanostores-backed subscription whose store teardown is
+// deferred by nanostores' own STORE_UNMOUNT_DELAY (1000ms), well past this test's own
+// completion. That deferred cleanup (better-auth's cleanupBroadcastSetup) then fires during a
+// later, unrelated test file after this one's jsdom environment is gone, throwing
+// "ReferenceError: window is not defined" as an unhandled exception that fails the whole run —
+// intermittent and file-order-dependent, exactly matching every other page's test file, which
+// all already mock this for the same reason.
+vi.mock('@/lib/auth-client', () => ({
+  authClient: { useSession: () => ({ data: { user: { role: 'admin' } } }) },
+}));
+
 function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -64,15 +76,15 @@ describe('MediaLibraryPage', () => {
 
     renderPage();
 
-    await waitFor(() => expect(screen.getByText('No media yet')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('No unfiled media')).toBeInTheDocument());
   });
 
   it('uploads a file through the dialog and refetches the list', async () => {
-    let mediaListCalls = 0;
+    let uploaded = false;
     getMock.mockImplementation((path: string) => {
       if (path === '/api/v1/admin/settings') return Promise.resolve(null);
-      mediaListCalls += 1;
-      if (mediaListCalls === 1) return Promise.resolve([]);
+      if (path.startsWith('/api/v1/admin/media-folders')) return Promise.resolve([]);
+      if (!uploaded) return Promise.resolve([]);
       return Promise.resolve([
         {
           id: 'm-1',
@@ -85,10 +97,13 @@ describe('MediaLibraryPage', () => {
         },
       ]);
     });
-    uploadMock.mockResolvedValue({ id: 'm-1' });
+    uploadMock.mockImplementation(() => {
+      uploaded = true;
+      return Promise.resolve({ id: 'm-1' });
+    });
 
     renderPage();
-    await waitFor(() => expect(screen.getByText('No media yet')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('No unfiled media')).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole('button', { name: 'Upload media' }));
     const dialog = screen.getByRole('dialog');
@@ -120,7 +135,8 @@ describe('MediaLibraryPage', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('photo.png')).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole('button', { name: 'Delete photo.png' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Manage photo.png' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Delete/ }));
     const alert = await screen.findByRole('alertdialog');
     expect(within(alert).getByText('Delete "photo.png"?')).toBeInTheDocument();
     await userEvent.click(within(alert).getByRole('button', { name: 'Delete' }));
@@ -158,6 +174,45 @@ describe('MediaLibraryPage', () => {
     expect(screen.getByText('photo.png')).toBeInTheDocument();
   });
 
+  it('opens a full-size preview dialog when a grid thumbnail is clicked', async () => {
+    getMock.mockResolvedValue([
+      {
+        id: 'm-1',
+        filename: 'photo.png',
+        contentType: 'image/png',
+        size: 1024,
+        width: 100,
+        height: 50,
+        altText: 'A nice photo',
+      },
+    ]);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('photo.png')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: 'View photo.png full size' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('photo.png')).toBeInTheDocument();
+    const image = within(dialog).getByAltText('A nice photo');
+    expect(image).toHaveAttribute('src', expect.stringContaining('/api/v1/admin/media/m-1/file'));
+  });
+
+  it('opens the same preview dialog from the list view filename', async () => {
+    getMock.mockResolvedValue([
+      { id: 'm-1', filename: 'photo.png', contentType: 'image/png', size: 1024, width: 100, height: 50, altText: null },
+    ]);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('photo.png')).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: 'List view' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'View photo.png full size' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByAltText('photo.png')).toBeInTheDocument();
+  });
+
   it('does not delete when the alert dialog is cancelled', async () => {
     getMock.mockResolvedValue([
       {
@@ -174,7 +229,8 @@ describe('MediaLibraryPage', () => {
     renderPage();
     await waitFor(() => expect(screen.getByText('photo.png')).toBeInTheDocument());
 
-    await userEvent.click(screen.getByRole('button', { name: 'Delete photo.png' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Manage photo.png' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Delete/ }));
     const alert = await screen.findByRole('alertdialog');
     await userEvent.click(within(alert).getByRole('button', { name: 'Cancel' }));
 

@@ -8,6 +8,7 @@ import { EntryDeveloperPanel } from '@/components/developer-panel/entry-develope
 import { EntryRevisionHistory } from '@/components/entry-revision-history';
 import { FieldInput } from '@/components/field-input';
 import { ApiError } from '@/lib/api-client';
+import { buildPreviewUrl } from '@/lib/preview-url';
 import { useContentType } from '@/lib/queries/content-types';
 import { useCreateEntry, useDeleteEntry, useEntry, useUpdateEntry, fetchPreviewToken } from '@/lib/queries/entries';
 import { useFieldDefinitions } from '@/lib/queries/field-definitions';
@@ -122,7 +123,7 @@ function LivePreviewButton({
 
   async function handlePreview() {
     if (isDirty) {
-      toast.error('Save your changes first — Live Preview shows what is currently saved.');
+      toast.error('Save your changes first. Live Preview shows the saved version.');
       return;
     }
     if (!settings?.previewUrl) {
@@ -136,9 +137,10 @@ function LivePreviewButton({
     setLoading(true);
     try {
       const { token } = await fetchPreviewToken(entry.id);
-      const url = settings.previewUrl
-        .replace('{contentType}', encodeURIComponent(contentTypeSlug))
-        .replace('{slug}', encodeURIComponent(entry.slug));
+      const url = buildPreviewUrl(settings.previewUrl, {
+        contentType: encodeURIComponent(contentTypeSlug),
+        slug: encodeURIComponent(entry.slug),
+      });
       const separator = url.includes('?') ? '&' : '?';
       window.open(`${url}${separator}preview_token=${encodeURIComponent(token)}`, '_blank', 'noopener,noreferrer');
     } catch (err) {
@@ -252,14 +254,22 @@ function EntryForm({ contentTypeId, contentTypeSlug, entryId, fields, entry }: E
 
     try {
       if (isNew) {
-        await createEntry.mutateAsync(payload);
+        const created = await createEntry.mutateAsync(payload);
         toast.success('Entry created');
+        // Land on the new entry's own editor rather than the list, so it behaves exactly like
+        // an update from here on (stays on the page, can keep editing/see revision history).
+        justSavedRef.current = true;
+        void navigate(`/content-types/${contentTypeId}/entries/${created.id}`, { replace: true });
       } else {
+        // Deliberately stay on the page instead of navigating back to the list — bouncing an
+        // editor away from what they're working on every time they hit Save is bad UX. The
+        // update invalidates the entry query, which changes EntryForm's `key` (entryId +
+        // updatedAt) and remounts it with the freshly saved values as the new initial state,
+        // resetting isDirty without any manual bookkeeping here.
         await updateEntry.mutateAsync(payload);
         toast.success('Entry saved');
+        justSavedRef.current = true;
       }
-      justSavedRef.current = true;
-      void navigate(`/content-types/${contentTypeId}/entries`);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Failed to save entry';
       setError(message);

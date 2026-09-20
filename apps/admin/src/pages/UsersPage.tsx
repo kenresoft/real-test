@@ -119,13 +119,13 @@ const ASSIGNABLE_ROLES = USER_ROLES.filter((role) => role !== 'owner');
 // Distinct colors below Owner (which keeps its own primary tint above) — gives the Users page
 // the same at-a-glance role scan as Strapi's role badges. Viewer stays unaccented, matching its
 // standing as this deployment's lowest-privilege, nothing-granted tier.
-const ROLE_BADGE_TONE: Partial<Record<UserRole, string>> = {
+const ROLE_BADGE_TONE: Partial<Record<AdminUser['role'], string>> = {
   admin: 'border-swatch-3/30 bg-swatch-3/14 text-swatch-3',
   editor: 'border-swatch-2/30 bg-swatch-2/14 text-swatch-2',
   author: 'border-swatch-4/30 bg-swatch-4/14 text-swatch-4',
 };
 
-const ROLE_SELECT_TONE: Partial<Record<UserRole, string>> = {
+const ROLE_SELECT_TONE: Partial<Record<AdminUser['role'], string>> = {
   admin: 'text-swatch-3',
   editor: 'text-swatch-2',
   author: 'text-swatch-4',
@@ -215,9 +215,12 @@ function DeveloperToolsCell({ user, canEdit }: { user: AdminUser; canEdit: boole
   );
 }
 
-// Shown once, right after creation — there's no email sending configured (§9), so this is the
-// only place the temporary password is ever visible. Copy-to-clipboard because reading a
-// 24-character random string aloud or retyping it is exactly the kind of thing that goes wrong.
+// Shown once, right after creation — this is the only place in the admin UI the temporary
+// password is ever visible (it's also emailed to the new user, but never shown again here).
+// The new user still can't sign in with it until they've clicked the separate verification
+// link also sent to their inbox — this password alone doesn't prove or grant verification.
+// Copy-to-clipboard because reading a 24-character random string aloud or retyping it is
+// exactly the kind of thing that goes wrong.
 function TemporaryPasswordDialog({
   created,
   onClose,
@@ -234,7 +237,7 @@ function TemporaryPasswordDialog({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Could not copy — select and copy the password manually');
+      toast.error('Could not copy. Select and copy the password manually.');
     }
   }
 
@@ -244,7 +247,7 @@ function TemporaryPasswordDialog({
         <DialogHeader>
           <DialogTitle>{created?.user.name} was added</DialogTitle>
           <DialogDescription>
-            Share this temporary password with them directly — it won't be shown again. They can change
+            Share this temporary password with them directly. It won't be shown again. They can change
             it from their Profile page after signing in.
           </DialogDescription>
         </DialogHeader>
@@ -303,8 +306,9 @@ function AddUserDialog({ onCreated }: { onCreated: (result: { user: AdminUser; t
         <DialogHeader>
           <DialogTitle>Add user</DialogTitle>
           <DialogDescription>
-            Creates the account directly with a random temporary password, shown once after you submit —
-            there's no email invite (no email sending is configured yet). New users default to editor.
+            Creates the account with a random temporary password, shown once after you submit. A
+            verification email will also be sent to this address. The new user must verify it before
+            they can sign in. New users default to editor.
           </DialogDescription>
         </DialogHeader>
         <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
@@ -362,10 +366,10 @@ function SessionsDialog({ user }: { user: AdminUser }) {
         </DialogTrigger>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Sessions — {user.name}</DialogTitle>
+            <DialogTitle>Sessions for {user.name}</DialogTitle>
             <DialogDescription>
               Every device currently signed in as this user. Revoking one signs that device out
-              immediately — it will need to sign in again.
+              immediately. It will need to sign in again.
             </DialogDescription>
           </DialogHeader>
 
@@ -490,7 +494,7 @@ function DisableUserControl({ user }: { user: AdminUser }) {
         open={elevateOpen}
         onOpenChange={setElevateOpen}
         onElevated={() => void performToggle(true)}
-        description="Disabling an administrator is a security-sensitive action — re-enter your password to continue."
+        description="Disabling an administrator is a security-sensitive action. Enter your password to continue."
       />
     </>
   );
@@ -567,6 +571,13 @@ export function UsersPage() {
           row.original.disabled ? (
             <Badge variant="outline" className="gap-1 border-destructive/30 bg-destructive/10 text-destructive">
               Disabled
+            </Badge>
+          ) : !row.original.emailVerified ? (
+            // Can't sign in yet (apps/api/src/lib/auth.ts's requireEmailVerification) — distinct
+            // from "never active," which describes a verified account that just hasn't signed
+            // in since being created.
+            <Badge variant="outline" className="gap-1 border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400">
+              Unverified
             </Badge>
           ) : (
             <StatusBadge status={row.original.lastActiveAt !== null ? 'active' : 'never-active'} />

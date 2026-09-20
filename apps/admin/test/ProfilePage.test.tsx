@@ -109,7 +109,26 @@ describe('ProfilePage', () => {
     await userEvent.type(nameInput, 'New Name');
     await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
-    await waitFor(() => expect(updateUserMock).toHaveBeenCalledWith({ name: 'New Name' }));
+    // preferredMailClient is always sent alongside name — '' (not omitted/undefined) for the
+    // default "Default (your device's mail app)" selection, since better-auth's updateUser
+    // never delivers an omitted/undefined key to the server at all (a real, previously-missed
+    // gap: it would have made "switch back to default" silently no-op).
+    await waitFor(() =>
+      expect(updateUserMock).toHaveBeenCalledWith({ name: 'New Name', preferredMailClient: '' }),
+    );
+  });
+
+  it('saves a selected preferred mail app through the Profile tab', async () => {
+    updateUserMock.mockResolvedValue({ error: null });
+
+    renderPage();
+    await userEvent.click(screen.getByLabelText('Preferred mail app'));
+    await userEvent.click(screen.getByRole('option', { name: 'Gmail' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() =>
+      expect(updateUserMock).toHaveBeenCalledWith({ name: 'Acme Admin', preferredMailClient: 'gmail' }),
+    );
   });
 
   it('changes the password through the Security tab', async () => {
@@ -162,6 +181,38 @@ describe('ProfilePage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Verify and enable' }));
 
     await waitFor(() => expect(verifyTotpMock).toHaveBeenCalledWith({ code: '654321' }));
+  });
+
+  it('hides owner-only recovery controls for a non-owner', async () => {
+    renderPage();
+    await userEvent.click(screen.getByRole('tab', { name: 'Security' }));
+
+    expect(screen.queryByText('Recovery codes')).not.toBeInTheDocument();
+    expect(screen.queryByText('Transfer ownership')).not.toBeInTheDocument();
+  });
+
+  it('shows owner-only recovery codes and transfer-ownership controls for the owner, linking to Users instead of duplicating it', async () => {
+    useSessionMock.mockReturnValue({
+      data: {
+        user: {
+          id: 'owner-1',
+          name: 'Acme Owner',
+          email: 'owner@example.test',
+          role: 'owner',
+          image: null,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          twoFactorEnabled: false,
+        },
+      },
+      isPending: false,
+    });
+
+    renderPage();
+    await userEvent.click(screen.getByRole('tab', { name: 'Security' }));
+
+    expect(screen.getByText('Recovery codes')).toBeInTheDocument();
+    expect(screen.getAllByText('Transfer ownership').length).toBeGreaterThan(0);
+    expect(screen.getByRole('link', { name: 'Users' })).toHaveAttribute('href', '/users');
   });
 
   it('disables two-factor authentication with a password confirmation', async () => {

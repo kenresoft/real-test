@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -50,7 +50,6 @@ describe('SettingsPage', () => {
     putMock.mockResolvedValue({
       id: 's-1',
       name: 'Acme Corp',
-      corsOrigin: null,
       featureFlags: null,
       updatedAt: '2026-01-01T00:00:00.000Z',
     });
@@ -66,9 +65,11 @@ describe('SettingsPage', () => {
     await waitFor(() =>
       expect(putMock).toHaveBeenCalledWith('/api/v1/admin/settings', {
         name: 'Acme Corp',
-        corsOrigin: null,
         featureFlags: null,
         previewUrl: null,
+        pagePreviewUrl: null,
+        emailSenderName: null,
+        emailSenderEmail: null,
       }),
     );
   });
@@ -120,7 +121,6 @@ describe('SettingsPage', () => {
     await waitFor(() => expect(screen.getByLabelText('Default title')).toBeInTheDocument());
 
     await userEvent.click(screen.getByRole('button', { name: 'API' }));
-    expect(screen.getByLabelText('CORS origin')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /API reference/ })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /Appearance/ }));
@@ -131,6 +131,65 @@ describe('SettingsPage', () => {
     expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument();
   });
 
+  it('groups sections under SITE/EXPERIENCE/SYSTEM/DEVELOPER headings and lists unavailable sections separately under Coming soon', async () => {
+    useSessionMock.mockReturnValue({ data: { user: { role: 'admin', email: 'admin@example.test' } } });
+    getMock.mockResolvedValue(null);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText('Site name')).toBeInTheDocument());
+
+    const nav = screen.getByRole('navigation', { name: 'Settings sections' });
+    expect(within(nav).getByText('Site')).toBeInTheDocument();
+    expect(within(nav).getByText('Experience')).toBeInTheDocument();
+    expect(within(nav).getByText('System')).toBeInTheDocument();
+    expect(within(nav).getByText('Developer')).toBeInTheDocument();
+    expect(within(nav).getByText('Coming soon')).toBeInTheDocument();
+
+    // Available sections appear as ordinary, unmarked buttons in their group.
+    expect(within(nav).getByRole('button', { name: 'General' })).toBeInTheDocument();
+    expect(within(nav).getByRole('button', { name: 'Webhooks' })).toBeInTheDocument();
+
+    // Unavailable sections (Security, Notifications, Storage, Database) are pulled out of the
+    // four primary groups and rendered once, under the secondary "Coming soon" heading only.
+    expect(within(nav).getByRole('button', { name: /Security/ })).toBeInTheDocument();
+    expect(within(nav).getByRole('button', { name: /Notifications/ })).toBeInTheDocument();
+  });
+
+  it('does not duplicate Users & Permissions inside Settings now that Users is a primary nav area', async () => {
+    useSessionMock.mockReturnValue({ data: { user: { role: 'admin', email: 'admin@example.test' } } });
+    getMock.mockResolvedValue(null);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText('Site name')).toBeInTheDocument());
+
+    expect(screen.queryByRole('button', { name: /Users & Permissions/ })).not.toBeInTheDocument();
+  });
+
+  it('filters settings sections via search, matching on keywords as well as labels', async () => {
+    useSessionMock.mockReturnValue({ data: { user: { role: 'admin', email: 'admin@example.test' } } });
+    getMock.mockResolvedValue(null);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText('Site name')).toBeInTheDocument());
+
+    const nav = screen.getByRole('navigation', { name: 'Settings sections' });
+    const search = screen.getByLabelText('Search settings');
+
+    await userEvent.type(search, 'webhook');
+    expect(within(nav).getByRole('button', { name: 'Webhooks' })).toBeInTheDocument();
+    expect(within(nav).queryByRole('button', { name: 'General' })).not.toBeInTheDocument();
+
+    // Matches a keyword, not just the section's own label.
+    await userEvent.clear(search);
+    await userEvent.type(search, 'logo');
+    expect(within(nav).getByRole('button', { name: 'General' })).toBeInTheDocument();
+    expect(within(nav).queryByRole('button', { name: 'Webhooks' })).not.toBeInTheDocument();
+
+    await userEvent.clear(search);
+    await userEvent.type(search, 'nonexistent-setting-xyz');
+    expect(within(nav).getByText(/No settings match/)).toBeInTheDocument();
+  });
+
   it('renders read-only, with no save button, for an editor', async () => {
     useSessionMock.mockReturnValue({ data: { user: { role: 'editor', email: 'editor@example.test' } } });
     getMock.mockImplementation((path: string) => {
@@ -138,7 +197,6 @@ describe('SettingsPage', () => {
         return Promise.resolve({
           id: 's-1',
           name: 'Acme Corp',
-          corsOrigin: null,
           featureFlags: null,
           updatedAt: '2026-01-01T00:00:00.000Z',
         });

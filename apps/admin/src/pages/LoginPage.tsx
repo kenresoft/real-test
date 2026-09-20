@@ -1,14 +1,14 @@
 import { useState, type FormEvent } from 'react';
-import { AlertCircle, Eye, EyeOff, Layers, Loader2 } from 'lucide-react';
+import { AlertCircle, Eye, EyeOff, Loader2, MailCheck } from 'lucide-react';
 import { Link, Navigate } from 'react-router';
 
+import kenresoftLogoMark from '@/assets/kenresoft-cms-logo-mark.svg';
 import { authClient } from '@/lib/auth-client';
+import { hasCmsAccess } from '@/lib/types';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-
-type Mode = 'sign-in' | 'sign-up';
 
 // This page's own larger scale, not a change to the shared Input/Button components (which
 // stay their normal size for the dozens of dense, data-table-heavy screens elsewhere in the
@@ -21,15 +21,16 @@ function BrandMark({ className }: { className?: string }) {
     <div
       className={`flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground ${className ?? ''}`}
     >
-      <Layers className="size-5" />
+      {/* The logo mark's own stroke is the fixed brand blue (#4c4fe0) — recolored to white via
+          filter rather than shipping a second, white-only asset, since this box is always a
+          colored (primary or translucent-on-primary) background either way. */}
+      <img src={kenresoftLogoMark} alt="" className="size-5 brightness-0 invert" />
     </div>
   );
 }
 
 export function LoginPage() {
   const { data: session, isPending } = authClient.useSession();
-  const [mode, setMode] = useState<Mode>('sign-in');
-  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -38,6 +39,11 @@ export function LoginPage() {
   const [needsTwoFactor, setNeedsTwoFactor] = useState(false);
   const [useBackupCode, setUseBackupCode] = useState(false);
   const [twoFactorCode, setTwoFactorCode] = useState('');
+  // Set when sign-in is rejected specifically because the account hasn't verified its email
+  // yet (apps/api/src/lib/auth.ts's requireEmailVerification) — a distinct state from the
+  // generic error banner, since the fix here isn't "try again," it's "check your inbox."
+  const [needsVerification, setNeedsVerification] = useState(false);
+  const [resendState, setResendState] = useState<'idle' | 'sending' | 'sent'>('idle');
 
   // Reacts to the same session store AppLayout redirects from — sign-in resolves the HTTP
   // call before the client's session store finishes its own follow-up refresh, so navigating
@@ -57,14 +63,24 @@ export function LoginPage() {
     const { data: sessionData } = await authClient.getSession();
     if (!sessionData) {
       setError(
-        "Signed in, but your browser blocked the session cookie. This happens when the admin and API are served from different sites and your browser blocks third-party/cross-site cookies — check your browser's cookie settings for this site, or use a same-site deployment.",
+        "You're signed in, but your browser blocked the session cookie. This happens when the admin and API run on different sites and your browser blocks cross-site cookies. Check your cookie settings for this site, or host both on the same site.",
       );
+      return;
+    }
+    // Accounts are shared with the website (a storefront customer signs in with the same
+    // credentials) — a valid session without a CMS role isn't an admin user. The server refuses
+    // every admin route for it anyway; this just says so instead of showing a broken dashboard.
+    if (!hasCmsAccess((sessionData.user as { role?: string }).role)) {
+      await authClient.signOut();
+      setError('This account does not have access to the CMS. Ask an administrator to grant you a role.');
     }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setNeedsVerification(false);
+    setResendState('idle');
     setIsSubmitting(true);
 
     // Wrapped in try/catch (missing before, and not just theoretical — this is exactly what
@@ -72,13 +88,18 @@ export function LoginPage() {
     // pointed at a real deployment: a CORS-rejected request throws instead of resolving to
     // `{ error }`, and with no catch here that left isSubmitting stuck true with no feedback).
     try {
-      const { data, error: authError } =
-        mode === 'sign-in'
-          ? await authClient.signIn.email({ email, password })
-          : await authClient.signUp.email({ email, password, name });
+      const { data, error: authError } = await authClient.signIn.email({ email, password });
 
       if (authError) {
-        setError(authError.message ?? (mode === 'sign-in' ? 'Sign in failed' : 'Sign up failed'));
+        // The server already re-sent a fresh verification email itself on this rejection
+        // (emailVerification.sendOnSignIn) — this just switches the UI into the matching
+        // state rather than showing the generic red error banner, and offers a resend button
+        // for whoever didn't get (or lost) that first one.
+        if (authError.code === 'EMAIL_NOT_VERIFIED') {
+          setNeedsVerification(true);
+          return;
+        }
+        setError(authError.message ?? 'Sign in failed');
         return;
       }
 
@@ -110,7 +131,7 @@ export function LoginPage() {
         : await authClient.twoFactor.verifyTotp({ code: twoFactorCode });
 
       if (authError) {
-        setError(authError.message ?? 'Invalid code — please try again.');
+        setError(authError.message ?? 'Invalid code. Try again.');
         return;
       }
 
@@ -122,10 +143,17 @@ export function LoginPage() {
     }
   }
 
-  function switchMode() {
-    setMode((prev) => (prev === 'sign-in' ? 'sign-up' : 'sign-in'));
-    setError(null);
-    setShowPassword(false);
+  async function handleResendVerification() {
+    setResendState('sending');
+    try {
+      // Deliberately generic outcome regardless of what actually happened server-side —
+      // better-auth's own unauthenticated send-verification-email endpoint is itself
+      // enumeration-safe (constant-time, same response whether the address exists or is
+      // already verified), so this UI shouldn't claim more certainty than that.
+      await authClient.sendVerificationEmail({ email });
+    } finally {
+      setResendState('sent');
+    }
   }
 
   return (
@@ -151,8 +179,8 @@ export function LoginPage() {
             A Cloudflare-native, API-first content platform.
           </h1>
           <p className="text-lg text-primary-foreground/75">
-            Model content, manage entries and media, and publish to any frontend — Astro,
-            Next.js, or your own — through one clean REST API.
+            Model content, manage entries and media, and publish to any frontend through one REST API.
+            Works with Astro, Next.js, or your own site.
           </p>
         </div>
         <p className="relative text-sm text-primary-foreground/60">
@@ -172,7 +200,49 @@ export function LoginPage() {
         </div>
 
         <div className="flex w-full max-w-md flex-col gap-8">
-          {needsTwoFactor ? (
+          {needsVerification ? (
+            <div className="flex flex-col gap-6">
+              <div className="flex flex-col gap-3">
+                <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                  <MailCheck className="size-5" />
+                </div>
+                <h2 className="text-2xl font-semibold tracking-tight">Verify your email</h2>
+                <p className="text-base text-muted-foreground">
+                  Please verify your email address before signing in. We've sent a verification link to{' '}
+                  <span className="font-medium text-foreground">{email}</span>. Check your inbox.
+                </p>
+              </div>
+
+              {resendState === 'sent' ? (
+                <div className="flex items-start gap-2.5 rounded-lg border border-success/25 bg-success/10 px-4 py-3 text-sm text-success">
+                  <MailCheck className="mt-0.5 size-4 shrink-0" />
+                  <span>If that email needs verifying, we've sent a new link. Check your inbox.</span>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={resendState === 'sending'}
+                  onClick={() => void handleResendVerification()}
+                  className={`${FIELD_CLASS} gap-2 text-base`}
+                >
+                  {resendState === 'sending' ? <Loader2 className="size-5 animate-spin" /> : null}
+                  {resendState === 'sending' ? 'Sending…' : 'Resend verification email'}
+                </Button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setNeedsVerification(false);
+                  setResendState('idle');
+                }}
+                className="text-center text-sm text-muted-foreground hover:text-foreground"
+              >
+                Back to sign in
+              </button>
+            </div>
+          ) : needsTwoFactor ? (
             <>
               <div className="flex flex-col gap-2">
                 <h2 className="text-3xl font-semibold tracking-tight">Two-factor verification</h2>
@@ -228,33 +298,11 @@ export function LoginPage() {
           ) : (
             <>
               <div className="flex flex-col gap-2">
-                <h2 className="text-3xl font-semibold tracking-tight">
-                  {mode === 'sign-in' ? 'Sign in' : 'Create your account'}
-                </h2>
-                <p className="text-base text-muted-foreground">
-                  {mode === 'sign-in'
-                    ? 'Welcome back — enter your credentials to continue.'
-                    : 'The first account created on this deployment becomes its admin.'}
-                </p>
+                <h2 className="text-3xl font-semibold tracking-tight">Sign in</h2>
+                <p className="text-base text-muted-foreground">Welcome back. Sign in to continue.</p>
               </div>
 
               <form className="flex flex-col gap-5" onSubmit={handleSubmit}>
-            {mode === 'sign-up' ? (
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="name" className="text-sm">
-                  Name
-                </Label>
-                <Input
-                  id="name"
-                  autoComplete="name"
-                  required
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  className={FIELD_CLASS}
-                />
-              </div>
-            ) : null}
-
             <div className="flex flex-col gap-2">
               <Label htmlFor="email" className="text-sm">
                 Email
@@ -275,17 +323,15 @@ export function LoginPage() {
                 <Label htmlFor="password" className="text-sm">
                   Password
                 </Label>
-                {mode === 'sign-in' ? (
-                  <Link to="/forgot-password" className="text-sm text-muted-foreground hover:text-foreground">
-                    Forgot password?
-                  </Link>
-                ) : null}
+                <Link to="/forgot-password" className="text-sm text-muted-foreground hover:text-foreground">
+                  Forgot password?
+                </Link>
               </div>
               <div className="relative">
                 <Input
                   id="password"
                   type={showPassword ? 'text' : 'password'}
-                  autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'}
+                  autoComplete="current-password"
                   required
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
@@ -311,27 +357,16 @@ export function LoginPage() {
 
             <Button type="submit" disabled={isSubmitting} className={`${FIELD_CLASS} mt-1 gap-2 text-base`}>
               {isSubmitting ? <Loader2 className="size-5 animate-spin" /> : null}
-              {isSubmitting
-                ? mode === 'sign-in'
-                  ? 'Signing in…'
-                  : 'Creating account…'
-                : mode === 'sign-in'
-                  ? 'Sign in'
-                  : 'Create account'}
+              {isSubmitting ? 'Signing in…' : 'Sign in'}
             </Button>
           </form>
 
-          <div className="flex items-center gap-3 text-sm">
-            <span className="h-px flex-1 bg-border" />
-            <span className="text-muted-foreground">
-              {mode === 'sign-in' ? "Don't have an account?" : 'Already have an account?'}
-            </span>
-            <span className="h-px flex-1 bg-border" />
-          </div>
-
-              <Button type="button" variant="outline" onClick={switchMode} className={`${FIELD_CLASS} text-base`}>
-                {mode === 'sign-in' ? 'Create an account' : 'Sign in instead'}
-              </Button>
+              {/* This is the CMS entry point only. Website visitors register and sign in on the
+                  site itself; both use the same underlying accounts (one identity, two front
+                  doors), and CMS access is granted to an account by an administrator. */}
+              <p className="text-center text-sm text-muted-foreground">
+                CMS accounts are created by an administrator. Not on the team? Sign in on the website instead.
+              </p>
             </>
           )}
         </div>

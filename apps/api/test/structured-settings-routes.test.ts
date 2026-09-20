@@ -1,15 +1,9 @@
 import { SELF, env } from 'cloudflare:test';
+import { signUpVerifiedAndGetCookie } from './helpers/auth';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 async function authedCookie(email: string): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'correct horse battery staple', name: 'Test User' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie(email, { password: 'correct horse battery staple', name: 'Test User' });
 }
 
 describe('structured settings admin routes (real D1)', () => {
@@ -118,6 +112,36 @@ describe('structured settings admin routes (real D1)', () => {
       "SELECT action, target_id FROM audit_log WHERE action = 'structured_settings.updated'",
     ).first<{ action: string; target_id: string }>();
     expect(row).toMatchObject({ action: 'structured_settings.updated', target_id: 'seo' });
+  });
+
+  it('accepts navigation items with either a url or a pageId target, and rejects one with neither', async () => {
+    const cookie = await authedCookie('ss-nav@example.test');
+    const headers = { Cookie: cookie, 'Content-Type': 'application/json' };
+
+    const ok = await SELF.fetch('https://example.com/api/v1/admin/structured-settings/navigation', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        items: [
+          { label: 'Home', url: '/', visible: true, order: 0, external: false, newTab: false },
+          { label: 'About', pageId: 'page-1', visible: true, order: 1, external: false, newTab: false },
+        ],
+      }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({
+      module: 'navigation',
+      data: { items: [{ url: '/' }, { pageId: 'page-1' }] },
+    });
+
+    const bad = await SELF.fetch('https://example.com/api/v1/admin/structured-settings/navigation', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({
+        items: [{ label: 'Neither', visible: true, order: 0, external: false, newTab: false }],
+      }),
+    });
+    expect(bad.status).toBe(400);
   });
 
   it('rejects every structured settings route without a session', async () => {

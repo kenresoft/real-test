@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { systemRoute } from '../src/routes/system/recover-owner';
 import type { Bindings } from '../src/lib/env';
+import { signUpVerifiedAndGetCookie } from './helpers/auth';
 
 const PASSWORD = 'correct horse battery staple';
 const NEW_PASSWORD = 'a completely different passphrase';
@@ -12,14 +13,7 @@ const NEW_PASSWORD = 'a completely different passphrase';
 const CONFIGURED_SECRET = 'test-only-owner-recovery-secret-not-used-outside-vitest-pool-workers';
 
 async function signUp(email: string): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: PASSWORD, name: 'Test User' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie(email, { password: PASSWORD, name: 'Test User' });
 }
 
 async function recoverOwner(body: Record<string, unknown>) {
@@ -29,6 +23,31 @@ async function recoverOwner(body: Record<string, unknown>) {
     body: JSON.stringify(body),
   });
 }
+
+describe('deployment status — auth secret field', () => {
+  it('reports authSecretConfigured true against the real, test-configured secret', async () => {
+    const response = await systemRoute.request('/status', {}, env as unknown as Bindings);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ authSecretConfigured: true });
+  });
+
+  it('reports authSecretConfigured false when BETTER_AUTH_SECRET is missing or the known default', async () => {
+    const missing = await systemRoute.request(
+      '/status',
+      {},
+      { ...env, BETTER_AUTH_SECRET: undefined } as unknown as Bindings,
+    );
+    expect((await missing.json())).toMatchObject({ authSecretConfigured: false });
+
+    const defaulted = await systemRoute.request(
+      '/status',
+      {},
+      { ...env, BETTER_AUTH_SECRET: 'better-auth-secret-12345678901234567890' } as unknown as Bindings,
+    );
+    expect((await defaulted.json())).toMatchObject({ authSecretConfigured: false });
+  });
+});
 
 describe('break-glass owner recovery — not configured', () => {
   it('404s outright when OWNER_RECOVERY_SECRET is absent from Bindings entirely', async () => {

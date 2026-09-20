@@ -1,6 +1,7 @@
 import { createBrowserRouter } from 'react-router';
 
 import { AppLayout } from '@/layouts/AppLayout';
+import { RouteErrorBoundary } from '@/components/route-error-boundary';
 import { pluginRoutes } from '@/plugins/registry';
 
 // Every page is a separate chunk, downloaded only when its route is actually visited —
@@ -15,26 +16,39 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     lazy: async () => ({ Component: (await import('@/pages/LoginPage')).LoginPage }),
+    errorElement: <RouteErrorBoundary />,
   },
   {
     path: '/forgot-password',
     lazy: async () => ({
       Component: (await import('@/pages/ForgotPasswordPage')).ForgotPasswordPage,
     }),
+    errorElement: <RouteErrorBoundary />,
   },
   {
     path: '/reset-password',
     lazy: async () => ({ Component: (await import('@/pages/ResetPasswordPage')).ResetPasswordPage }),
+    errorElement: <RouteErrorBoundary />,
+  },
+  {
+    path: '/verify-email',
+    lazy: async () => ({ Component: (await import('@/pages/VerifyEmailPage')).VerifyEmailPage }),
+    errorElement: <RouteErrorBoundary />,
   },
   {
     path: '/recover-with-code',
     lazy: async () => ({
       Component: (await import('@/pages/RecoverWithCodePage')).RecoverWithCodePage,
     }),
+    errorElement: <RouteErrorBoundary />,
   },
   {
     path: '/',
     element: <AppLayout />,
+    // A single errorElement here also catches any error thrown by a lazy-loaded child route
+    // below (React Router bubbles a route error up to the nearest ancestor that defines one) —
+    // covers every authenticated page without repeating this on each of the ~25 child routes.
+    errorElement: <RouteErrorBoundary />,
     children: [
       {
         index: true,
@@ -57,6 +71,22 @@ export const router = createBrowserRouter([
         }),
       },
       {
+        path: 'pages',
+        lazy: async () => ({ Component: (await import('@/pages/PagesPage')).PagesPage }),
+      },
+      {
+        path: 'pages/:pageId',
+        lazy: async () => ({ Component: (await import('@/pages/PageEditorPage')).PageEditorPage }),
+      },
+      {
+        path: 'templates',
+        lazy: async () => ({ Component: (await import('@/pages/TemplatesPage')).TemplatesPage }),
+      },
+      {
+        path: 'reusable-blocks',
+        lazy: async () => ({ Component: (await import('@/pages/ReusableBlocksPage')).ReusableBlocksPage }),
+      },
+      {
         path: 'media',
         lazy: async () => ({
           Component: (await import('@/pages/MediaLibraryPage')).MediaLibraryPage,
@@ -77,10 +107,20 @@ export const router = createBrowserRouter([
         }),
       },
       {
+        path: 'forms/:formId/submissions/:submissionId',
+        lazy: async () => ({
+          Component: (await import('@/pages/SubmissionDetailPage')).SubmissionDetailPage,
+        }),
+      },
+      {
         path: 'submissions',
         lazy: async () => ({
           Component: (await import('@/pages/AllSubmissionsPage')).AllSubmissionsPage,
         }),
+      },
+      {
+        path: 'email',
+        lazy: async () => ({ Component: (await import('@/pages/EmailPage')).EmailPage }),
       },
       {
         path: 'settings',
@@ -105,14 +145,23 @@ export const router = createBrowserRouter([
         lazy: async () => ({ Component: (await import('@/pages/ProfilePage')).ProfilePage }),
       },
       {
+        // The primary destination for a content type — its Entries (the actual content/data),
+        // not its schema. Reachable both here and at the `/entries` alias below (kept working
+        // for any existing bookmark/link) so both resolve to the exact same page.
         path: 'content-types/:contentTypeId',
-        lazy: async () => ({
-          Component: (await import('@/pages/ContentTypeDetailPage')).ContentTypeDetailPage,
-        }),
+        lazy: async () => ({ Component: (await import('@/pages/EntriesPage')).EntriesPage }),
       },
       {
         path: 'content-types/:contentTypeId/entries',
         lazy: async () => ({ Component: (await import('@/pages/EntriesPage')).EntriesPage }),
+      },
+      {
+        // Schema/fields — the structural, secondary view. One click away via ContentTypeTabs,
+        // not a separate top-level navigation path.
+        path: 'content-types/:contentTypeId/schema',
+        lazy: async () => ({
+          Component: (await import('@/pages/ContentTypeDetailPage')).ContentTypeDetailPage,
+        }),
       },
       {
         path: 'content-types/:contentTypeId/entries/:entryId',

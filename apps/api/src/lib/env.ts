@@ -5,12 +5,7 @@ export interface Bindings {
   AUTH_RATE_LIMITER: RateLimit;
   RECOVERY_RATE_LIMITER: RateLimit;
   PUBLIC_CONTENT_RATE_LIMITER: RateLimit;
-  // Commerce's customer-auth sub-path (register/login/logout/password-reset/verify-email) —
-  // declared via PluginRegistration.publicRateLimits, applied generically by
-  // apps/api/src/plugins/mount.ts (docs/PLUGINS.md), not hardcoded to Commerce there. Lives here
-  // in Bindings (not PluginBindings) since the plugin itself never reads this binding directly —
-  // only Core's mount.ts does, before the plugin's own router ever runs.
-  COMMERCE_CUSTOMER_AUTH_RATE_LIMITER: RateLimit;
+  ADMIN_EMAIL_RATE_LIMITER: RateLimit;
   API_VERSION: string;
   CORS_ORIGINS: string;
   BETTER_AUTH_SECRET: string;
@@ -43,4 +38,15 @@ export interface Bindings {
   // docs/PLUGINS.md's Commerce section. Paystack's test-mode secret key (`sk_test_...`) and its
   // live key both work here unchanged; which one is configured is entirely an operator choice.
   PAYSTACK_SECRET_KEY?: string;
+  // Gates the public /api/v1/openapi.json + /api/v1/docs (Scalar) routes. Defaults to enabled
+  // (unset or anything other than "false") so local dev and every existing deployment keep
+  // working with zero config — set to "false" to 404 both routes on a deployment that would
+  // rather not expose its full API surface (including authenticated-route shapes) to anonymous
+  // requests. See docs/DEPLOYMENT.md.
+  API_DOCS_ENABLED?: string;
+  // Opt-in, for a frontend that proxies /cms/* to this API (@kenresoft-cms/astro's
+  // createCmsProxy). A Worker secret (`wrangler secret put TRUSTED_PROXY_SECRET`), also given to
+  // the proxy: a request presenting it may name the real visitor's IP for rate limiting.
+  // Unset by default — see lib/client-ip.ts.
+  TRUSTED_PROXY_SECRET?: string;
 }

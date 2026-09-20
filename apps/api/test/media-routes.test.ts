@@ -1,15 +1,9 @@
 import { SELF, env } from 'cloudflare:test';
+import { signUpVerifiedAndGetCookie } from './helpers/auth';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 async function authedCookie(email: string): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'correct horse battery staple', name: 'Test User' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie(email, { password: 'correct horse battery staple', name: 'Test User' });
 }
 
 // A byte-valid PNG header (signature + IHDR) — enough for the route's sniffImage validation
@@ -118,5 +112,57 @@ describe('media routes (real D1 + R2)', () => {
       headers: { Cookie: cookie },
     });
     expect(response.status).toBe(404);
+  });
+
+  it('renames a media item and updates its alt text without touching its bytes/key', async () => {
+    const cookie = await authedCookie('media-4@example.test');
+
+    const form = new FormData();
+    form.set('file', new File([pngBytes(64, 64)], 'original.png', { type: 'image/png' }));
+
+    const uploadRes = await SELF.fetch('https://example.com/api/v1/admin/media', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+      body: form,
+    });
+    const uploaded = await uploadRes.json<{ id: string; key: string }>();
+
+    const patchRes = await SELF.fetch(`https://example.com/api/v1/admin/media/${uploaded.id}`, {
+      method: 'PATCH',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: 'renamed.png', altText: 'A renamed photo' }),
+    });
+    expect(patchRes.status).toBe(200);
+    const updated = await patchRes.json<{ filename: string; altText: string; key: string }>();
+    expect(updated.filename).toBe('renamed.png');
+    expect(updated.altText).toBe('A renamed photo');
+    expect(updated.key).toBe(uploaded.key);
+
+    // A bare PATCH with no fields is a no-op, not an error.
+    const noopRes = await SELF.fetch(`https://example.com/api/v1/admin/media/${uploaded.id}`, {
+      method: 'PATCH',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    expect(noopRes.status).toBe(200);
+    expect((await noopRes.json<{ filename: string }>()).filename).toBe('renamed.png');
+  });
+
+  it('404s renaming a non-existent media item, and rejects without a session', async () => {
+    const cookie = await authedCookie('media-5@example.test');
+
+    const notFoundRes = await SELF.fetch('https://example.com/api/v1/admin/media/does-not-exist', {
+      method: 'PATCH',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: 'x.png' }),
+    });
+    expect(notFoundRes.status).toBe(404);
+
+    const unauthedRes = await SELF.fetch('https://example.com/api/v1/admin/media/does-not-exist', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: 'x.png' }),
+    });
+    expect(unauthedRes.status).toBe(401);
   });
 });

@@ -3,12 +3,15 @@ import { constantTimeEqual, hashPassword } from 'better-auth/crypto';
 import { z } from 'zod';
 
 import { recordAudit } from '../../lib/audit';
+import { isAuthSecretConfigured } from '../../lib/auth';
 import { getDb } from '../../lib/db';
+import { isEmailProviderConfigured } from '../../lib/email';
 import { createOpenApiApp } from '../../lib/openapi';
 import { getCredentialAccount, updateAccountPassword } from '../../repositories/accounts';
 import { deleteAllSessionsForUser } from '../../repositories/sessions';
 import { getUserByEmail } from '../../repositories/users';
 import type { Bindings } from '../../lib/env';
+import { getClientIp } from '../../lib/client-ip';
 
 export const systemRoute = createOpenApiApp<{ Bindings: Bindings }>();
 
@@ -19,30 +22,48 @@ const requestSchema = z.object({
 });
 const errorSchema = z.object({ error: z.string() });
 const successSchema = z.object({ message: z.string() });
-const statusSchema = z.object({ emailConfigured: z.boolean() });
+const statusSchema = z.object({ emailConfigured: z.boolean(), authSecretConfigured: z.boolean() });
 
 // Unauthenticated by design — this is deployment-wide, not per-account, so it carries none of
 // the account-enumeration risk that keeps /public/password-reset/request's response generic
-// regardless of input. Lets ForgotPasswordPage/RecoverWithCodePage tell someone up front that
-// password-reset email can't actually be delivered on this deployment (EMAIL_PROVIDER unset),
-// rather than them clicking "Send reset link" and waiting on an email that was never going to
-// arrive. docs/DEPLOYMENT.md's recovery section has the setup steps for enabling real delivery.
+// regardless of input. Lets ForgotPasswordPage/RecoverWithCodePage/LoginPage's verification
+// UI tell someone up front that password-reset and account-verification email can't actually
+// be delivered on this deployment, rather than them waiting on an email that was never going
+// to arrive. docs/DEPLOYMENT.md's recovery section has the setup steps for enabling real
+// delivery.
+//
+// Checks the full required config per provider, not just EMAIL_PROVIDER's own value — setting
+// EMAIL_PROVIDER=resend with no RESEND_API_KEY/EMAIL_FROM (or =cloudflare with no EMAIL
+// binding/EMAIL_FROM) would previously have reported "configured" even though
+// resend.ts/cloudflare.ts already throw at actual send time. Still purely static, no network
+// call — this is not a live delivery test.
+//
+// authSecretConfigured lets an operator (or the setup/update CLI) check whether
+// BETTER_AUTH_SECRET is real without needing `wrangler secret list` CLI access at all — a real
+// deployment was found running on better-auth's own known-default secret with nothing in the
+// normal request flow surfacing it (docs/ARCHITECTURE.md's Changelog has the incident).
+// createAuth() itself now refuses to start at all in that state (apps/api/src/lib/auth.ts), so
+// this field will only ever read `false` for a request that never reaches an authed route in
+// the first place — still worth exposing here since this endpoint is unauthenticated and cheap
+// to check proactively, before anything else 500s.
 systemRoute.openapi(
   createRoute({
     method: 'get',
     path: '/status',
     tags: ['System'],
-    summary: 'Deployment-wide feature availability (currently just email delivery)',
+    summary: 'Deployment-wide feature availability (email delivery, auth secret)',
     responses: {
       200: {
-        description: 'Whether this deployment has a real email provider configured.',
+        description: 'Whether this deployment has a real email provider and a real auth secret configured.',
         content: { 'application/json': { schema: statusSchema } },
       },
     },
   }),
   (c) => {
-    const emailConfigured = c.env.EMAIL_PROVIDER === 'cloudflare' || c.env.EMAIL_PROVIDER === 'resend';
-    return c.json({ emailConfigured }, 200);
+    return c.json(
+      { emailConfigured: isEmailProviderConfigured(c.env), authSecretConfigured: isAuthSecretConfigured(c.env.BETTER_AUTH_SECRET) },
+      200,
+    );
   },
 );
 
@@ -94,7 +115,7 @@ systemRoute.openapi(
 
     // Rate limited only once the feature is confirmed enabled — inlined rather than the shared
     // recoveryRateLimit middleware so the 404-when-unset check above always runs first.
-    const rateLimitKey = c.req.header('CF-Connecting-IP') ?? 'local-dev';
+    const rateLimitKey = getClientIp(c.req.raw.headers, c.env);
     const { success } = await c.env.RECOVERY_RATE_LIMITER.limit({ key: rateLimitKey });
     if (!success) {
       return c.json({ error: 'Too many requests, please try again later' }, 429);

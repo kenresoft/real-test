@@ -1,8 +1,8 @@
 import { createDb } from '@kenresoft-cms/database';
-import { createCustomerSession } from '@kenresoft-cms/plugin-ecommerce/src/repository/customer-sessions';
-import { createCustomer } from '@kenresoft-cms/plugin-ecommerce/src/repository/customers';
 import { SELF, env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
+
+import { registerWebsiteUser, signUpVerifiedAndGetCookie } from './helpers/auth';
 
 const ADMIN_BASE = 'https://example.com/api/plugins/commerce/v1';
 const CART_BASE = 'https://example.com/api/plugins/commerce/public/v1/cart';
@@ -18,27 +18,17 @@ const SHIPPING_ADDRESS = {
 };
 
 async function freshAdminCookie(email = 'commerce-orders-admin@example.test'): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'correct horse battery staple', name: 'Admin' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie(email, { password: 'correct horse battery staple', name: 'Admin' });
 }
 
 async function signUpEditor(): Promise<string> {
   // First signup becomes admin (this codebase's own bootstrap rule); a second signup defaults to
   // editor. Promote nobody — this is exactly the role floor being tested.
   await freshAdminCookie('commerce-orders-bootstrap@example.test');
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'commerce-orders-editor@example.test', password: 'correct horse battery staple', name: 'Editor' }),
+  return signUpVerifiedAndGetCookie('commerce-orders-editor@example.test', {
+    password: 'correct horse battery staple',
+    name: 'Editor',
   });
-  const setCookie = response.headers.get('set-cookie');
-  return setCookie!.split(';')[0]!;
 }
 
 async function createPublishedProduct(adminCookie: string) {
@@ -60,10 +50,7 @@ async function createVariant(adminCookie: string, productId: string, overrides: 
 }
 
 async function registeredCustomer(email: string) {
-  const db = createDb(env.DB);
-  const customer = await createCustomer(db, { email, name: 'Test Customer', password: 'correct horse battery staple' });
-  const rawToken = await createCustomerSession(db, customer.id);
-  return { customer, cookie: `commerce_customer_session=${rawToken}` };
+  return registerWebsiteUser(email);
 }
 
 // Payment settlement is authoritative and lives entirely outside PATCH /orders/{id}/status
@@ -95,8 +82,6 @@ describe('commerce plugin: order management (real D1)', () => {
     await env.DB.exec('DELETE FROM plugin_commerce_orders');
     await env.DB.exec('DELETE FROM plugin_commerce_cart_items');
     await env.DB.exec('DELETE FROM plugin_commerce_carts');
-    await env.DB.exec('DELETE FROM plugin_commerce_customer_sessions');
-    await env.DB.exec('DELETE FROM plugin_commerce_customers');
     await env.DB.exec('DELETE FROM plugin_commerce_product_variants');
     await env.DB.exec('DELETE FROM plugin_commerce_products');
     await env.DB.exec('DELETE FROM session');

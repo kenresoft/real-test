@@ -1,27 +1,115 @@
 import type {
+  BlockInstance,
+  ChildBlockInstance,
   ContactSettingsData,
   Entry,
   FooterSettingsData,
   FormSubmission,
   GeneralSettingsData,
   NavigationSettingsData,
+  Page,
+  PageListItem,
   PublicMedia,
+  PublicMediaListItem,
+  ReusableBlock,
+  RoutePatternEntry,
   SeoSettingsData,
   SocialSettingsData,
 } from '@kenresoft-cms/contracts';
+
+import { createAuth, type KenresoftAuth } from './auth';
+import { KenresoftApiError, type FormSubmissionIssue } from './errors';
+
+export { KenresoftApiError, type FormSubmissionIssue };
+export type {
+  AuthMessage,
+  AuthSession,
+  AuthSessionData,
+  AuthUser,
+  ChangePasswordOptions,
+  KenresoftAuth,
+  RequestPasswordResetOptions,
+  ResendVerificationEmailOptions,
+  ResetPasswordOptions,
+  SignInOptions,
+  SignInResult,
+  SignUpOptions,
+  TwoFactorEnableResult,
+  VerifyEmailOptions,
+} from './auth';
+
+export type { BlockInstance, ChildBlockInstance, Page, ReusableBlock };
 
 // Type-only imports — erased at compile time, so this package never actually depends on zod
 // (or anything else @kenresoft-cms/contracts pulls in) at runtime. They exist purely so this
 // client's return types stay in sync with the API's real response shapes instead of a
 // hand-maintained copy — see the "Types" note in docs/ASTRO.md.
-export type { Entry, FormSubmission, PublicMedia };
+export type { Entry, FormSubmission, PublicMedia, PublicMediaListItem, RoutePatternEntry };
+
+// Phase 1 of the schema-driven frontend work (docs/SITE_BUILDER.md) — a read-only field
+// renderer registry, independent of the request/response client below. Re-exported here so
+// `import { renderField, registerFieldRenderer } from '@kenresoft-cms/astro'` works without a
+// consumer needing to know about the internal `render/` module layout.
+export {
+  registerFieldRenderer,
+  renderField,
+  resolveFieldRenderer,
+  type FieldRenderer,
+  type FieldRenderResult,
+  type RenderableField,
+} from './render/field-renderers';
+
+// Phase 2 of the schema-driven frontend work (docs/SITE_BUILDER.md) — dynamic content routing.
+// `resolveRoute()`/`matchRoutePattern()` are pure functions, independent of the client below;
+// pair them with `client.routePatterns.list()` to build a generic catch-all Astro route.
+export {
+  matchRoutePattern,
+  resolveRoute,
+  resolveSiteRoute,
+  type ResolvedRoute,
+  type ResolvedSiteRoute,
+} from './render/resolve-route';
+
+// Phase 7 of the schema-driven frontend work (docs/SITE_BUILDER.md §6) — the developer-override
+// half of block rendering; see block-renderers.ts's own top comment for why the built-in
+// default components live in examples/astro-site instead of here.
+export { registerBlockRenderer, resolveBlockRenderer, type BlockComponent } from './render/block-renderers';
+
+// Phase 6 of the schema-driven frontend work (docs/SITE_BUILDER.md §3.7) — resolves a
+// Navigation item's `pageId` reference to that Page's own `route`, alongside its plain `url`
+// items. Pair with `client.pages.list()` below.
+export { resolveNavigationItems, type ResolvedNavigationItem } from './render/resolve-navigation';
 
 export interface KenresoftClientConfig {
   /** Base URL of a Kenresoft CMS deployment, e.g. "http://localhost:8787" in local dev. */
   url: string;
   /** Override for testing — defaults to the global fetch. */
   fetch?: typeof fetch;
+  /**
+   * Binds this client instance to one request's Live Preview session — every
+   * `entries.get()`/`pages.resolve()` call made through it automatically uses this as its
+   * `previewToken`, with no need to pass it per call. The intended, global way to wire up Live
+   * Preview: create one client per request (e.g. in Astro middleware, stored on
+   * `context.locals`) with `previewToken: getPreviewToken(context.url)`, and every page that
+   * reads from `context.locals` gets Live Preview for free — no page needs to know about
+   * `?preview_token=` at all. A call's own explicit `previewToken` (including `null`, to force
+   * published-only even when this default is set) still overrides this default when given.
+   * See `getPreviewToken()` below and `integrations/astro/README.md`'s "Live Preview" section.
+   */
+  previewToken?: string | null;
+  /**
+   * The incoming request's `cookie` header, for server-side rendering: forwarded on every call
+   * so `auth.getSession()` / `commerce.customer.get()` can tell who the visitor is during SSR
+   * (e.g. `cookies: Astro.request.headers.get('cookie')`). Only useful when the site and API
+   * share a cookie domain — on separate sites the browser never sends the API's cookie to your
+   * site, so run the check in the browser instead. Ignored when a custom `fetch` is supplied
+   * (you're then handling headers yourself).
+   */
+  cookies?: string | null;
 }
+
+export { getPreviewToken } from './get-preview-token';
+export { createCmsProxy, isProxiedPathAllowed, type CmsProxyOptions } from './proxy';
 
 // Commerce (packages/plugin-ecommerce) types, hand-mirrored from that plugin's own Zod route
 // schemas rather than imported — unlike @kenresoft-cms/contracts, the plugin package isn't
@@ -191,7 +279,11 @@ export interface RegisterCustomerOptions {
   email: string;
   password: string;
   name: string;
-  phone?: string | null;
+  /**
+   * Where the emailed verification link sends the customer once verified (their own site, e.g.
+   * `${origin}/account/verify-email`). Must be an origin in the deployment's CORS_ORIGINS.
+   */
+  callbackUrl?: string;
 }
 
 export interface LoginCustomerOptions {
@@ -201,6 +293,11 @@ export interface LoginCustomerOptions {
 
 export interface RequestCustomerPasswordResetOptions {
   email: string;
+  /**
+   * The customer's own reset page; the emailed link becomes `<redirectUrl>?token=...`. Must be an
+   * origin in the deployment's CORS_ORIGINS, otherwise the email falls back to the admin app's page.
+   */
+  redirectUrl?: string;
 }
 
 export interface ConfirmCustomerPasswordResetOptions {
@@ -214,6 +311,8 @@ export interface VerifyCustomerEmailOptions {
 
 export interface ResendCustomerVerificationEmailOptions {
   email: string;
+  /** Same meaning as RegisterCustomerOptions.callbackUrl. */
+  callbackUrl?: string;
 }
 
 export interface UpdateCustomerProfileOptions {
@@ -265,30 +364,6 @@ export interface CommerceOrderDetail extends CommerceOrderSummary {
   items: CommerceOrderItem[];
 }
 
-export interface FormSubmissionIssue {
-  path: (string | number)[];
-  message: string;
-}
-
-// Thrown for any non-2xx, non-404 response from entries.list/entries.get (a 404 there is not
-// an error from this client's perspective — see request() below — since "no content type with
-// that slug" and "no published entry with that slug" are both normal, expected outcomes for
-// public content), and for ANY non-2xx response from forms.submit, where 400/404/429 are all
-// meaningfully different outcomes a caller needs to handle, not something to paper over as
-// null. `issues` is populated only for a 400 from forms.submit — the form-specific field
-// validation errors (apps/api/src/lib/form-submission-validation.ts).
-export class KenresoftApiError extends Error {
-  status: number;
-  issues: FormSubmissionIssue[] | undefined;
-
-  constructor(status: number, message: string, issues?: FormSubmissionIssue[]) {
-    super(message);
-    this.name = 'KenresoftApiError';
-    this.status = status;
-    this.issues = issues;
-  }
-}
-
 export interface ListEntriesOptions {
   /** The content type's slug (not its display name) — e.g. "blog-post". */
   contentType: string;
@@ -297,6 +372,16 @@ export interface ListEntriesOptions {
 export interface GetEntryOptions extends ListEntriesOptions {
   /** The entry's own slug within that content type. */
   slug: string;
+  /**
+   * Optional. Pass a Live Preview token straight through — e.g. `getPreviewToken(Astro.url)` —
+   * and this call transparently renders a draft (or any status) via the same signed-token
+   * mechanism `entries.preview()` uses, with no separate branch needed in your own template.
+   * Omitting this option entirely falls back to the client's own `previewToken` default (see
+   * `KenresoftClientConfig.previewToken`), if one was set when the client was created — the
+   * global, per-page-code-free way to wire this up. Pass `null` explicitly to force normal
+   * published-only rendering even when the client has a default set.
+   */
+  previewToken?: string | null;
 }
 
 export interface PreviewEntryOptions extends GetEntryOptions {
@@ -314,6 +399,37 @@ export interface MediaUrlOptions {
   id: string;
 }
 
+export interface MediaFolderOptions {
+  /** A media folder's slug (e.g. "home-page-hero"), not its id or display name. */
+  slug: string;
+}
+
+export interface ResolvePageOptions {
+  /** The Page's literal route, e.g. "/about" — not a `{slug}` pattern. */
+  route: string;
+  /**
+   * Optional. Same convention as `GetEntryOptions.previewToken` above — pass a token to
+   * transparently render a draft (or any status) Page, omit to fall back to the client's own
+   * `previewToken` default, or pass `null` to force published-only regardless of that default.
+   */
+  previewToken?: string | null;
+}
+
+export interface PreviewPageOptions extends ResolvePageOptions {
+  /**
+   * A signed, page-scoped token from `GET /api/v1/admin/pages/:id/preview-token` (Kenresoft
+   * CMS's Page Editor's "Live Preview" button generates one and appends it to the link it
+   * opens) — an expired/invalid/wrong-page token 404s (`null`) exactly like a nonexistent
+   * route does through `pages.resolve()`. Never the normal path for rendering published Pages.
+   */
+  token: string;
+}
+
+export interface GetReusableBlockOptions {
+  /** A reusable block's own id — typically a `config.reusableBlockId` on a `reusableBlockRef` block. */
+  id: string;
+}
+
 export interface SubmitFormOptions {
   /** The form's slug, not its display name — e.g. "contact". */
   formSlug: string;
@@ -326,6 +442,14 @@ export interface SubmitFormOptions {
 }
 
 export interface KenresoftClient {
+  /**
+   * Generic frontend authentication against Core's own better-auth (`/api/v1/auth/*`) and
+   * password-reset routes — sign up/in/out, session, email verification, password reset/change,
+   * and two-factor. Independent of Commerce or any plugin; `commerce.customerAuth` below is a
+   * thin adapter over this same object. Browser-side use is the norm: the session cookie must
+   * land in the visitor's own cookie jar. See the package README's "Authentication" section.
+   */
+  auth: KenresoftAuth;
   entries: {
     /**
      * Every published entry for a content type, newest-published-first is NOT guaranteed —
@@ -340,12 +464,16 @@ export interface KenresoftClient {
      * A single published entry by slug, or null if there's no content type with that slug,
      * or no *published* entry with that slug — including when a draft entry with that exact
      * slug exists (docs/ARCHITECTURE.md §6/§14: a draft 404s exactly like a slug that doesn't
-     * exist, from the public API's perspective).
+     * exist, from the public API's perspective). Pass `options.previewToken` to render a draft
+     * instead — see `GetEntryOptions.previewToken`; equivalent to calling `preview()` below but
+     * without a separate branch in your own template.
      */
     get(options: GetEntryOptions): Promise<Entry | null>;
     /**
      * Fetches one entry regardless of draft/published status, given a valid preview token for
-     * it — see `PreviewEntryOptions.token`. Powers Live Preview; not used for normal rendering.
+     * it — see `PreviewEntryOptions.token`. Powers Live Preview; equivalent to
+     * `get({ ...options, previewToken: options.token })` — kept as its own method for callers
+     * that always have a token in hand and want that explicit in their own code.
      */
     preview(options: PreviewEntryOptions): Promise<Entry | null>;
   };
@@ -362,6 +490,13 @@ export interface KenresoftClient {
      * layout space before the file loads). Returns null if no media exists with that id.
      */
     get(options: MediaUrlOptions): Promise<PublicMedia | null>;
+    /**
+     * Every item in a named media folder (e.g. "home-page-hero") — lets a frontend fetch a
+     * deliberately-curated collection instead of guessing at ids from the flat library. Returns
+     * an empty array for a folder slug that doesn't exist (folders have no draft/published
+     * distinction to hide, so this is just "no items", not a 404 worth throwing over).
+     */
+    byFolder(options: MediaFolderOptions): Promise<PublicMediaListItem[]>;
   };
   forms: {
     /**
@@ -380,6 +515,47 @@ export interface KenresoftClient {
      * 404 on, unlike entries/media.
      */
     list(): Promise<Record<string, string>>;
+  };
+  /**
+   * Phase 2 of the schema-driven frontend work (docs/SITE_BUILDER.md) — deliberately narrow:
+   * {contentTypeSlug, routePattern} pairs only, never field definitions (see
+   * routes/public/route-patterns.ts's own doc comment on why this is NOT the still-unresolved
+   * "public content-type metadata" question). Feeds `resolveRoute()` below.
+   */
+  routePatterns: {
+    /** Matches GET /api/v1/public/route-patterns exactly (edge-cached). An empty array if no content type has a routePattern set. */
+    list(): Promise<RoutePatternEntry[]>;
+  };
+  /**
+   * `list()` is deliberately narrow, like routePatterns above — id/route/title only, never the
+   * full block tree; feeds `resolveNavigationItems()` above and sitemap-style generation.
+   * `resolve()`/`preview()` fetch one Page fully, for actual rendering (Phase 7 — see
+   * `resolveSiteRoute()`/`<PageRenderer>` in `examples/astro-site`).
+   */
+  pages: {
+    /** Matches GET /api/v1/public/pages exactly (edge-cached). Only published pages. */
+    list(): Promise<PageListItem[]>;
+    /**
+     * A published Page by its exact route, or null if there's no Page there, or the Page at
+     * that route is a draft — a draft 404s exactly like a nonexistent route (§7, mirroring
+     * entries). Pass `options.previewToken` to render a draft instead — see
+     * `ResolvePageOptions.previewToken`.
+     */
+    resolve(options: ResolvePageOptions): Promise<Page | null>;
+    /**
+     * Fetches one Page regardless of draft/published status, given a valid preview token for
+     * it — see `PreviewPageOptions.token`. Powers Page Live Preview; equivalent to
+     * `resolve({ ...options, previewToken: options.token })`.
+     */
+    preview(options: PreviewPageOptions): Promise<Page | null>;
+  };
+  reusableBlocks: {
+    /**
+     * A reusable block's own type/config by id, resolved live (never cached beyond the normal
+     * edge TTL) since it's a *live reference* (§3.4) — editing it changes what every page
+     * embedding it renders next time. Returns null for an unknown id.
+     */
+    get(options: GetReusableBlockOptions): Promise<ReusableBlock | null>;
   };
   /**
    * Structured Settings (docs/ARCHITECTURE.md §6) — singleton, typed, schema-validated site
@@ -401,22 +577,25 @@ export interface KenresoftClient {
    * checkout, and Paystack payment confirmation. Only present/meaningful on a deployment that
    * has the commerce plugin installed and enabled; calling these against one that doesn't will
    * 404 the same way any disabled-plugin route does (docs/PLUGINS.md's enablement section).
-   * Deliberately guest-only for now — customer account registration/login/order-history and
-   * saved addresses aren't wired into this client yet (a real, separate follow-up: guest
-   * checkout is already Commerce's own complete, independently-supported purchase path, per
-   * docs/PLUGINS.md's Phase 2b/2c design, not a stopgap).
+   * Guest checkout and signed-in customers are both supported: a guest cart travels as a cookie,
+   * a customer is a Core account (see `auth` above and `customerAuth` below).
    */
   commerce: {
     /**
-     * Customer account registration/login/logout/password-reset/email-verification — the
-     * genuinely unauthenticated auth surface itself (packages/plugin-ecommerce/src/routes/
-     * customer-auth.ts). Separate from Core's own better-auth staff accounts entirely; a
-     * storefront customer and a CMS staff member are different identity systems.
+     * Customer account registration/login/logout/password-reset/email-verification. There is ONE
+     * identity system: these are thin wrappers over Core's own /api/v1/auth/* (better-auth) and
+     * /api/v1/public/password-reset/* routes — the very same accounts and sessions CMS staff use.
+     * A customer is simply an account with no CMS role, so signing up here can never confer CMS
+     * access, and the session cookie is the same one `commerce.customer`/cart/checkout read.
      */
     customerAuth: {
-      /** Throws KenresoftApiError (409) if that email is already registered. Signs the browser in on success. */
-      register(options: RegisterCustomerOptions): Promise<CommerceCustomer>;
-      /** Throws KenresoftApiError (401) for any invalid-credentials reason — deliberately identical whether the email exists, the password is wrong, or the account is disabled. */
+      /**
+       * Creates an account (no CMS access) and emails a verification link. The customer is NOT
+       * signed in until they verify their email, so this resolves without a session. Registering an
+       * already-registered email resolves identically (never reveals whether an account exists).
+       */
+      register(options: RegisterCustomerOptions): Promise<{ requiresEmailVerification: true }>;
+      /** Throws KenresoftApiError (401) for invalid credentials; (403) if the email isn't verified yet (a fresh verification email is sent). Resolves with the signed-in customer's profile. */
       login(options: LoginCustomerOptions): Promise<CommerceCustomer>;
       /** Idempotent — safe to call with no session. */
       logout(): Promise<void>;
@@ -424,10 +603,16 @@ export interface KenresoftClient {
       requestPasswordReset(options: RequestCustomerPasswordResetOptions): Promise<{ message: string }>;
       /** Throws KenresoftApiError (400) for an invalid/expired token. */
       confirmPasswordReset(options: ConfirmCustomerPasswordResetOptions): Promise<{ message: string }>;
-      /** Throws KenresoftApiError (400) for an invalid/expired token. */
+      /** For a site that builds its own verification link; throws KenresoftApiError for an invalid/expired token. (The default emailed link verifies server-side and redirects to `callbackUrl`.) */
       verifyEmail(options: VerifyCustomerEmailOptions): Promise<{ message: string }>;
       /** Always resolves with the same generic message regardless of whether the email matches an account or is already verified — never reveals either. */
       resendVerificationEmail(options: ResendCustomerVerificationEmailOptions): Promise<{ message: string }>;
+      /**
+       * Finishes a `login()` that rejected with `code: 'TWO_FACTOR_REQUIRED'`: verifies the
+       * authenticator (or single-use backup) code through `auth.twoFactor`, then resolves the
+       * signed-in customer's profile.
+       */
+      verifyTwoFactor(options: { code: string; method?: 'totp' | 'backup-code'; trustDevice?: boolean }): Promise<CommerceCustomer>;
     };
     /**
      * The signed-in customer's own profile/addresses/order-history — every method throws
@@ -437,7 +622,7 @@ export interface KenresoftClient {
       /** The current customer, or null with no valid session (never throws for that specific case). */
       get(): Promise<CommerceCustomer | null>;
       update(options: UpdateCustomerProfileOptions): Promise<CommerceCustomer>;
-      /** Throws KenresoftApiError (400) for an incorrect currentPassword. Revokes every other session. */
+      /** Core's better-auth change-password. Throws KenresoftApiError for an incorrect currentPassword. Revokes every other session. */
       changePassword(options: ChangeCustomerPasswordOptions): Promise<{ message: string }>;
       addresses: {
         list(): Promise<CommerceCustomerAddress[]>;
@@ -515,8 +700,18 @@ export interface KenresoftClient {
 
 export function createKenresoftClient(config: KenresoftClientConfig): KenresoftClient {
   const baseUrl = config.url.replace(/\/$/, '');
-  const doFetch = config.fetch ?? fetch;
+  const cookieHeader = config.cookies;
+  const doFetch: typeof fetch =
+    config.fetch ??
+    (cookieHeader
+      ? (input, init) => {
+          const headers = new Headers(init?.headers);
+          headers.set('cookie', cookieHeader);
+          return fetch(input, { ...init, headers });
+        }
+      : fetch);
   const commerceBase = `${baseUrl}/api/plugins/commerce/public/v1`;
+  const defaultPreviewToken = config.previewToken ?? null;
 
   // `credentials: 'include'` is required on every commerce call — cart identity (a guest cookie)
   // and, once accounts are wired in, a customer session, both travel as cookies that the API's
@@ -541,6 +736,20 @@ export function createKenresoftClient(config: KenresoftClientConfig): KenresoftC
 
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
+  }
+
+  // ONE auth implementation: the generic `auth` API. Commerce's customerAuth/changePassword
+  // below delegate to it rather than carrying their own copy of these Core calls.
+  const auth = createAuth(baseUrl, doFetch);
+
+  async function currentCustomer(): Promise<CommerceCustomer | null> {
+    const response = await doFetch(`${commerceBase}/customer`, { credentials: 'include' });
+    if (response.status === 401) return null;
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new KenresoftApiError(response.status, body?.error ?? `Kenresoft CMS API request failed: GET /customer -> ${response.status}`);
+    }
+    return (await response.json()) as CommerceCustomer;
   }
 
   // Mirrors request()'s own "404 -> null" convention below, for the one commerce read that has
@@ -573,13 +782,17 @@ export function createKenresoftClient(config: KenresoftClientConfig): KenresoftC
   }
 
   return {
+    auth,
     entries: {
       async list({ contentType }) {
         const entries = await request<Entry[]>(`/api/v1/public/${contentType}`);
         return entries ?? [];
       },
-      get({ contentType, slug }) {
-        return request<Entry>(`/api/v1/public/${contentType}/${slug}`);
+      get({ contentType, slug, previewToken }) {
+        const token = previewToken !== undefined ? previewToken : defaultPreviewToken;
+        return token
+          ? request<Entry>(`/api/v1/public/preview/${contentType}/${slug}?token=${encodeURIComponent(token)}`)
+          : request<Entry>(`/api/v1/public/${contentType}/${slug}`);
       },
       preview({ contentType, slug, token }) {
         return request<Entry>(`/api/v1/public/preview/${contentType}/${slug}?token=${encodeURIComponent(token)}`);
@@ -591,6 +804,10 @@ export function createKenresoftClient(config: KenresoftClientConfig): KenresoftC
       },
       get({ id }) {
         return request<PublicMedia>(`/api/v1/public/media/${id}`);
+      },
+      async byFolder({ slug }) {
+        const items = await request<PublicMediaListItem[]>(`/api/v1/public/media/folders/${slug}`);
+        return items ?? [];
       },
     },
     forms: {
@@ -622,6 +839,36 @@ export function createKenresoftClient(config: KenresoftClientConfig): KenresoftC
         return variables ?? {};
       },
     },
+    routePatterns: {
+      async list() {
+        const patterns = await request<RoutePatternEntry[]>('/api/v1/public/route-patterns');
+        return patterns ?? [];
+      },
+    },
+    pages: {
+      async list() {
+        const pages = await request<PageListItem[]>('/api/v1/public/pages');
+        return pages ?? [];
+      },
+      resolve({ route, previewToken }) {
+        const token = previewToken !== undefined ? previewToken : defaultPreviewToken;
+        return token
+          ? request<Page>(
+              `/api/v1/public/preview/pages?route=${encodeURIComponent(route)}&token=${encodeURIComponent(token)}`,
+            )
+          : request<Page>(`/api/v1/public/pages/by-route?route=${encodeURIComponent(route)}`);
+      },
+      preview({ route, token }) {
+        return request<Page>(
+          `/api/v1/public/preview/pages?route=${encodeURIComponent(route)}&token=${encodeURIComponent(token)}`,
+        );
+      },
+    },
+    reusableBlocks: {
+      get({ id }) {
+        return request<ReusableBlock>(`/api/v1/public/reusable-blocks/${id}`);
+      },
+    },
     settings: {
       async general() {
         return (await request<GeneralSettingsData>('/api/v1/public/settings/general')) ?? {};
@@ -644,44 +891,40 @@ export function createKenresoftClient(config: KenresoftClientConfig): KenresoftC
     },
     commerce: {
       customerAuth: {
-        register(options) {
-          return commerceRequest<CommerceCustomer>('/customer-auth/register', { method: 'POST', body: JSON.stringify(options) });
+        register: (options) => auth.signUp(options),
+        async login(options) {
+          const result = await auth.signIn(options);
+          if (result.twoFactorRequired) {
+            // This adapter resolves a customer profile, which doesn't exist until the second
+            // factor is verified. Use client.auth.signIn() + client.auth.twoFactor.* directly
+            // for accounts with two-factor enabled.
+            throw new KenresoftApiError(401, 'Two-factor authentication is required for this account.', undefined, 'TWO_FACTOR_REQUIRED');
+          }
+          const customer = await currentCustomer();
+          if (!customer) throw new KenresoftApiError(401, 'Signed in, but no session cookie reached the browser.');
+          return customer;
         },
-        login(options) {
-          return commerceRequest<CommerceCustomer>('/customer-auth/login', { method: 'POST', body: JSON.stringify(options) });
+        async verifyTwoFactor({ method = 'totp', ...options }) {
+          if (method === 'backup-code') await auth.twoFactor.verifyBackupCode(options);
+          else await auth.twoFactor.verifyTotp(options);
+          const customer = await currentCustomer();
+          if (!customer) throw new KenresoftApiError(401, 'Signed in, but no session cookie reached the browser.');
+          return customer;
         },
-        async logout() {
-          await commerceRequest<undefined>('/customer-auth/logout', { method: 'POST' });
-        },
-        requestPasswordReset(options) {
-          return commerceRequest<{ message: string }>('/customer-auth/password-reset/request', { method: 'POST', body: JSON.stringify(options) });
-        },
-        confirmPasswordReset(options) {
-          return commerceRequest<{ message: string }>('/customer-auth/password-reset/confirm', { method: 'POST', body: JSON.stringify(options) });
-        },
-        verifyEmail({ token }) {
-          return commerceRequest<{ message: string }>(`/customer-auth/verify-email?token=${encodeURIComponent(token)}`);
-        },
-        resendVerificationEmail(options) {
-          return commerceRequest<{ message: string }>('/customer-auth/verify-email/resend', { method: 'POST', body: JSON.stringify(options) });
-        },
+        logout: () => auth.signOut(),
+        requestPasswordReset: (options) => auth.requestPasswordReset(options),
+        confirmPasswordReset: (options) => auth.resetPassword(options),
+        verifyEmail: (options) => auth.verifyEmail(options),
+        resendVerificationEmail: (options) => auth.resendVerificationEmail(options),
       },
       customer: {
-        async get() {
-          const response = await doFetch(`${commerceBase}/customer`, { credentials: 'include' });
-          if (response.status === 401) return null;
-          if (!response.ok) {
-            const body = (await response.json().catch(() => null)) as { error?: string } | null;
-            throw new KenresoftApiError(response.status, body?.error ?? `Kenresoft CMS API request failed: GET /customer -> ${response.status}`);
-          }
-          return (await response.json()) as CommerceCustomer;
+        get() {
+          return currentCustomer();
         },
         update(options) {
           return commerceRequest<CommerceCustomer>('/customer', { method: 'PATCH', body: JSON.stringify(options) });
         },
-        changePassword(options) {
-          return commerceRequest<{ message: string }>('/customer/password', { method: 'PATCH', body: JSON.stringify(options) });
-        },
+        changePassword: (options) => auth.changePassword(options),
         addresses: {
           list() {
             return commerceRequest<CommerceCustomerAddress[]>('/customer/addresses');

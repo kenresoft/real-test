@@ -1,11 +1,11 @@
 import { createDb } from '@kenresoft-cms/database';
 import { listItemsWithDetail } from '@kenresoft-cms/plugin-ecommerce/src/repository/cart-items';
 import { getGuestCart } from '@kenresoft-cms/plugin-ecommerce/src/repository/carts';
-import { createCustomerSession } from '@kenresoft-cms/plugin-ecommerce/src/repository/customer-sessions';
-import { createCustomer } from '@kenresoft-cms/plugin-ecommerce/src/repository/customers';
 import { createOrder } from '@kenresoft-cms/plugin-ecommerce/src/repository/orders';
 import { SELF, env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it } from 'vitest';
+
+import { registerWebsiteUser, signUpVerifiedAndGetCookie } from './helpers/auth';
 
 const ADMIN_BASE = 'https://example.com/api/plugins/commerce/v1';
 const CART_BASE = 'https://example.com/api/plugins/commerce/public/v1/cart';
@@ -27,14 +27,7 @@ function extractGuestCartCookie(response: Response): string | undefined {
 }
 
 async function freshAdminCookie(): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'commerce-checkout-admin@example.test', password: 'correct horse battery staple', name: 'Admin' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie('commerce-checkout-admin@example.test', { password: 'correct horse battery staple', name: 'Admin' });
 }
 
 async function createPublishedProduct(adminCookie: string, overrides: Record<string, unknown> = {}) {
@@ -72,10 +65,7 @@ async function addToGuestCart(productId: string, variantId?: string, quantity = 
 }
 
 async function registeredCustomer(email: string) {
-  const db = createDb(env.DB);
-  const customer = await createCustomer(db, { email, name: 'Test Customer', password: 'correct horse battery staple' });
-  const rawToken = await createCustomerSession(db, customer.id);
-  return { customer, cookie: `commerce_customer_session=${rawToken}` };
+  return registerWebsiteUser(email);
 }
 
 describe('commerce plugin: checkout (real D1)', () => {
@@ -85,8 +75,6 @@ describe('commerce plugin: checkout (real D1)', () => {
     await env.DB.exec('DELETE FROM plugin_commerce_idempotency_keys');
     await env.DB.exec('DELETE FROM plugin_commerce_cart_items');
     await env.DB.exec('DELETE FROM plugin_commerce_carts');
-    await env.DB.exec('DELETE FROM plugin_commerce_customer_sessions');
-    await env.DB.exec('DELETE FROM plugin_commerce_customers');
     await env.DB.exec('DELETE FROM plugin_commerce_product_variants');
     await env.DB.exec('DELETE FROM plugin_commerce_product_images');
     await env.DB.exec('DELETE FROM plugin_commerce_products');

@@ -52,12 +52,49 @@ export const FORM_SUBMISSION_STATUSES = ['new', 'read', 'archived'] as const;
 
 export type FormSubmissionStatus = (typeof FORM_SUBMISSION_STATUSES)[number];
 
+// A person's own preference for which webmail app the "Reply by email" quick action opens
+// (apps/admin/src/lib/mail-compose-links.ts) — stored on user.preferredMailClient
+// (packages/database/schema/auth.ts), which is null/unset for "use the OS/browser default
+// mailto: handler" rather than one of these values, so this list only needs the non-default
+// options.
+export const MAIL_CLIENTS = ['gmail', 'outlook', 'yahoo', 'zoho'] as const;
+
+export type MailClient = (typeof MAIL_CLIENTS)[number];
+
 // Raster image types accepted for V1 (§14) — verified against the file's actual bytes at
 // upload time, not the client-supplied Content-Type (§9: never trust browser-provided MIME
 // types alone). Other media (PDF/doc, etc.) is future work.
 export const MEDIA_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
 
 export type MediaContentType = (typeof MEDIA_CONTENT_TYPES)[number];
+
+// Phase 5 (Media/Forms architecture review): a separate, additive contract for content types
+// only ever allowed on a *private* Media asset — kept deliberately distinct from
+// MEDIA_CONTENT_TYPES (the public, image-only contract) rather than widening that union, so the
+// public API's own response schema is never able to claim it might return a document. Mirrors
+// apps/api/src/lib/attachment-metadata.ts's own AttachmentContentType union (that file can't be
+// imported from here — it's an apps/api-only module — so the literal is duplicated, not
+// re-exported).
+export const MEDIA_DOCUMENT_CONTENT_TYPES = [
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+] as const;
+
+export type MediaDocumentContentType = (typeof MEDIA_DOCUMENT_CONTENT_TYPES)[number];
+
+// The full set of content types a Media row (admin-facing) can actually hold — public image
+// types plus, only for a private asset, a document type. publicMediaSchema/MEDIA_CONTENT_TYPES
+// alone remain the narrower, image-only contract for what the public API can ever return.
+export type AnyMediaContentType = MediaContentType | MediaDocumentContentType;
+
+// 'public' (default, every pre-existing Media row) is listed/servable by the public API exactly
+// as before; 'private' is excluded from every public Media route at the repository/query layer
+// (never a route-level filter an author could forget) and from the admin Media Library's default
+// grid (visitor/submission attachments belong on their owning resource's own detail view, not
+// mixed into the general library) — see docs/ARCHITECTURE.md's Phase 5 decisions.
+export const MEDIA_VISIBILITIES = ['public', 'private'] as const;
+
+export type MediaVisibility = (typeof MEDIA_VISIBILITIES)[number];
 
 // owner: represents ownership of this specific installation — everything admin can do, plus
 // immune to every other role's user-management actions (an admin can never demote, delete, or
@@ -76,6 +113,23 @@ export type MediaContentType = (typeof MEDIA_CONTENT_TYPES)[number];
 export const USER_ROLES = ['owner', 'admin', 'editor', 'author', 'viewer'] as const;
 
 export type UserRole = (typeof USER_ROLES)[number];
+
+// One identity system for everyone (better-auth's `user`): CMS staff and normal website/
+// application users (e.g. Commerce storefront customers) are the same kind of account. A website
+// user simply has no CMS role — the literal `'none'`, which is also the default for every new
+// account, so nothing that merely creates a user (public sign-up included) can ever yield CMS
+// access. USER_ROLES above stays the closed list of real CMS roles; ROLE_RANK/roleAtLeast never
+// see 'none'. Only authorized server-side code ever writes a CMS role — never the client
+// (apps/api/src/lib/auth-options.ts, `input: false`).
+export const NO_CMS_ACCESS = 'none' as const;
+
+export const ACCOUNT_ROLES = [...USER_ROLES, NO_CMS_ACCESS] as const;
+
+export type AccountRole = (typeof ACCOUNT_ROLES)[number];
+
+export function hasCmsAccess(role: string | null | undefined): role is UserRole {
+  return (USER_ROLES as readonly string[]).includes(role ?? '');
+}
 
 // Higher number = more privilege. Centralizes what used to be ~19 hand-copied exact-string
 // role comparisons across apps/api and apps/admin into one ranked comparison — requireRole()
@@ -136,3 +190,50 @@ export type SocialPlatform = (typeof SOCIAL_PLATFORMS)[number];
 export const WEBHOOK_EVENTS = ['entry.created', 'entry.updated', 'entry.published', 'entry.unpublished', 'entry.deleted'] as const;
 
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
+
+// Phase 2 of the schema-driven frontend work (docs/SITE_BUILDER.md): a content type's
+// `routePattern` (e.g. "/blog/{slug}") lets a frontend's route resolver recognize a URL as
+// belonging to that content type without a hardcoded route. Its first literal path segment
+// may never be one of these — reserved for the CMS's own API surface (`api`) and a possible
+// future proxied admin path (`admin`); this is the same reserved-path convention §7/§11 of
+// docs/SITE_BUILDER.md documents for the later Pages feature, kept here since route patterns
+// are the first thing in this codebase that needs it.
+export const RESERVED_ROUTE_PREFIXES = ['api', 'admin'] as const;
+
+// Phase 3 of the schema-driven frontend work (docs/SITE_BUILDER.md §3.3/§5): a Page's
+// composition tree is built from a small, code-defined set of block types — never an
+// admin-definable type — so a block's *behavior* is always a trusted, developer-registered
+// component and only its *content* (config) is admin-authored (§7 security model). Matches
+// §5's example list without over-building. Extending this set (or letting a plugin contribute
+// one, §9) is additive later — never a breaking change to an existing page's stored blocks.
+// Phase 4 (docs/SITE_BUILDER.md §3.4) added "reusableBlockRef" — a leaf block whose config is
+// `{reusableBlockId}`, resolving to a live reference to a `reusable_blocks` row (never a copy)
+// at render time. It's never itself the *type* of a reusable_blocks row (no reference chains)
+// and never allowed to carry children (see BLOCK_TYPES_ALLOWING_CHILDREN below).
+// "rawHtml" is a leaf block holding pasted HTML, kept behind a feature flag, admin-only writes and
+// server-side sanitising (apps/api/src/lib/raw-html-guard.ts). It is never a reusable block type.
+export const BLOCK_TYPES = [
+  'hero',
+  'richText',
+  'image',
+  'cta',
+  'columns',
+  'spacer',
+  'reusableBlockRef',
+  'rawHtml',
+] as const;
+
+export type BlockType = (typeof BLOCK_TYPES)[number];
+
+// Only container-shaped block types may hold a `children` array (§3.3) — everything else is a
+// leaf. Checked at the API layer (blocks.ts's validateBlockTree) so an admin can never nest
+// content under a block type that has nowhere to render it.
+export const BLOCK_TYPES_ALLOWING_CHILDREN: readonly BlockType[] = ['columns'];
+
+// A reusable_blocks row's own `type` column (Phase 4, docs/SITE_BUILDER.md §3.4) is restricted
+// to leaf, non-referencing block types: never "columns" (this table has no column to store
+// children in) and never "reusableBlockRef" itself (which would allow a reference chain a
+// renderer would have to detect and break). Kept as a literal tuple (not widened to
+// `readonly BlockType[]`) so `z.enum(REUSABLE_BLOCK_TYPES)` infers the exact literal union
+// rather than a plain `string`.
+export const REUSABLE_BLOCK_TYPES = ['hero', 'richText', 'image', 'cta', 'spacer'] as const;

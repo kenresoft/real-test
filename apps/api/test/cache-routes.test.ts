@@ -1,15 +1,9 @@
 import { SELF, env } from 'cloudflare:test';
+import { signUpVerifiedAndGetCookie } from './helpers/auth';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 async function authedCookie(email: string): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'correct horse battery staple', name: 'Test User' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie(email, { password: 'correct horse battery staple', name: 'Test User' });
 }
 
 describe('cache routes (real D1)', () => {
@@ -59,6 +53,13 @@ describe('cache routes (real D1)', () => {
       headers: { Cookie: ownerCookie },
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ entriesPurged: 1, mediaPurged: 0 });
+    // 2 keys for the one published entry (its content-type list page + its own detail page) —
+    // the draft is never included, since only published entries have a public cache key at all.
+    expect(await response.json()).toEqual({
+      id: expect.any(String),
+      totalItems: 2,
+      processedItems: 2,
+      done: true,
+    });
   });
 });

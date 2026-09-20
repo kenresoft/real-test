@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import {
+  Blocks,
   ClipboardList,
   FileText,
   Images,
   Inbox,
+  Mail,
+  Layers,
   LayoutDashboard,
   LayoutList,
-  Layers,
+  LayoutTemplate,
   LogOut,
   Puzzle,
   ScrollText,
@@ -18,6 +21,7 @@ import {
 } from 'lucide-react';
 import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router';
 
+import kenresoftLogoMark from '@/assets/kenresoft-cms-logo-mark.svg';
 import { authClient } from '@/lib/auth-client';
 import { usePlugins } from '@/lib/queries/plugins';
 import { roleAtLeast, type UserRole } from '@/lib/types';
@@ -57,6 +61,9 @@ const overviewItems = [{ to: '/', label: 'Dashboard', end: true, icon: LayoutDas
 const contentItems = [
   { to: '/content-types', label: 'Content types', end: false, icon: LayoutList },
   { to: '/entries', label: 'Entries', end: false, icon: FileText },
+  { to: '/pages', label: 'Pages', end: false, icon: LayoutTemplate },
+  { to: '/templates', label: 'Templates', end: false, icon: Layers },
+  { to: '/reusable-blocks', label: 'Reusable blocks', end: false, icon: Blocks },
   { to: '/global-variables', label: 'Global variables', end: false, icon: Variable },
 ];
 
@@ -65,6 +72,9 @@ const engagementItems = [
   { to: '/forms', label: 'Forms', end: false, icon: ClipboardList },
   { to: '/submissions', label: 'Submissions', end: false, icon: Inbox },
 ];
+
+// Sending needs editor or above (routes/admin/email.ts), so it's hidden below that.
+const emailItem = { to: '/email', label: 'Email', end: false, icon: Mail };
 
 const adminItems = [
   { to: '/users', label: 'Users', end: false, icon: Users },
@@ -138,6 +148,10 @@ export function AppLayout() {
     return <Navigate to="/login" replace />;
   }
 
+  const visibleEngagementItems = roleAtLeast(session.user.role as UserRole, 'editor')
+    ? [...engagementItems, emailItem]
+    : engagementItems;
+
   const visibleAdminItems = roleAtLeast(session.user.role as UserRole, 'admin')
     ? [...adminItems, auditLogItem, pluginsItem]
     : adminItems;
@@ -165,7 +179,7 @@ export function AppLayout() {
         <SidebarHeader className="px-3 py-3.5">
           <div className="flex items-center gap-2.5">
             <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground shadow-sm">
-              <Layers className="size-4" />
+              <img src={kenresoftLogoMark} alt="" className="size-4 brightness-0 invert" />
             </div>
             <span className="truncate text-[0.95rem] font-semibold tracking-tight group-data-[collapsible=icon]:hidden">
               Kenresoft CMS
@@ -187,7 +201,7 @@ export function AppLayout() {
           <SidebarGroup>
             <SidebarGroupLabel>Media &amp; Forms</SidebarGroupLabel>
             <SidebarGroupContent>
-              <NavItems items={engagementItems} pathname={location.pathname} />
+              <NavItems items={visibleEngagementItems} pathname={location.pathname} />
             </SidebarGroupContent>
           </SidebarGroup>
           <SidebarGroup>

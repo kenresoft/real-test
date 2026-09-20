@@ -10,7 +10,6 @@ export const settings = sqliteTable('settings', {
     .primaryKey()
     .$defaultFn(() => crypto.randomUUID()),
   name: text('name').notNull(),
-  corsOrigin: text('cors_origin'),
   featureFlags: text('feature_flags', { mode: 'json' }).$type<Record<string, boolean>>(),
   // Live Preview's URL template for the public frontend, e.g. "https://mysite.com/{contentType}/
   // {slug}" — the CMS is frontend-agnostic (docs/ARCHITECTURE.md §15) and has no way to know an
@@ -18,6 +17,17 @@ export const settings = sqliteTable('settings', {
   // actually uses. Substituted verbatim (no templating engine) by
   // apps/admin/src/pages/EntryEditorPage.tsx when building a preview link.
   previewUrl: text('preview_url'),
+  // Phase 5 of the schema-driven frontend work (docs/SITE_BUILDER.md §1.3/§20) — the equivalent
+  // template for Pages, which have no content-type/slug pair, only a single literal `route`,
+  // e.g. "https://mysite.com{route}". Kept as its own column rather than overloading
+  // `previewUrl` with two incompatible placeholder shapes.
+  pagePreviewUrl: text('page_preview_url'),
+  // Optional From identity for admin-initiated emails (form replies, the admin "send email"
+  // route) — never for system mail (password reset, verification), which stays on EMAIL_FROM.
+  // The domain must be verified/onboarded with the configured EMAIL_PROVIDER. Null = use
+  // EMAIL_FROM as before.
+  emailSenderName: text('email_sender_name'),
+  emailSenderEmail: text('email_sender_email'),
   createdAt: integer('created_at', { mode: 'timestamp' })
     .notNull()
     .default(sql`(unixepoch())`),

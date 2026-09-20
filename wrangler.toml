@@ -82,13 +82,11 @@ namespace_id = "1004"
 simple = { limit = 300, period = 60 }
 
 [[ratelimits]]
-# Commerce's customer-auth sub-path (register/login/logout/password-reset/verify-email) —
-# declared by the plugin-ecommerce package via PluginRegistration.publicRateLimits and applied
-# generically by apps/api/src/plugins/mount.ts (docs/PLUGINS.md); nothing about this binding is
-# hardcoded into Core beyond its name. Same posture as AUTH_RATE_LIMITER, for the same reason —
-# this is a real login/registration surface, brute-forceable without it.
-name = "COMMERCE_CUSTOMER_AUTH_RATE_LIMITER"
-namespace_id = "1005"
+# Admin-composed email (Email page and submission replies): 10 sends per 60s per staff user
+# (keyed by user id, not IP). Caps the damage a compromised or careless account can do — mail
+# spam, or provider quota/reputation burn — without getting in the way of normal use.
+name = "ADMIN_EMAIL_RATE_LIMITER"
+namespace_id = "1006"
 simple = { limit = 10, period = 60 }
 
 [triggers]
@@ -155,3 +153,10 @@ EMAIL_FROM = "noreply@kenresoft.com"
 #   wrangler secret put PAYSTACK_SECRET_KEY
 # Use a test-mode key (starts sk_test_) while developing/testing — Paystack itself decides
 # sandbox-vs-live purely from which key you use, nothing else here needs to change.
+
+# GET /api/v1/openapi.json + /api/v1/docs (the Scalar reference UI) are enabled by default —
+# useful for anyone building against this deployment's API, and Settings → API links to them.
+# They describe every route's shape, including authenticated admin/plugin routes (never actual
+# data). Set to "false" to 404 both, indistinguishable from not existing, if you'd rather not
+# expose that surface to anonymous requests:
+#   API_DOCS_ENABLED = "false"

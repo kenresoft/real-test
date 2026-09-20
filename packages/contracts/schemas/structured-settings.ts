@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { SOCIAL_PLATFORMS, STRUCTURED_SETTINGS_MODULES } from './enums';
+import { safeUrlSchema } from './safe-url';
 
 export const structuredSettingsModuleSchema = z.enum(STRUCTURED_SETTINGS_MODULES);
 
@@ -26,7 +27,7 @@ export const contactSettingsDataSchema = z.object({
 export const socialLinkSchema = z.object({
   platform: z.enum(SOCIAL_PLATFORMS),
   label: z.string().min(1).max(100),
-  url: z.string().url().max(500),
+  url: safeUrlSchema(500),
 });
 
 export const socialSettingsDataSchema = z.object({
@@ -34,14 +35,21 @@ export const socialSettingsDataSchema = z.object({
 });
 
 // --- navigation: intentionally simple — one flat, orderable list, no nested menus.
-export const navigationItemSchema = z.object({
+// A target is either a literal `url` or a `pageId` reference to a Page (docs/SITE_BUILDER.md
+// §3.7) — resolved to that Page's own `route` at render time by the Astro SDK. Existing
+// `url`-only rows keep validating unmodified; `pageId` is purely additive.
+const navigationItemBaseSchema = z.object({
   label: z.string().min(1).max(100),
-  url: z.string().min(1).max(500),
   visible: z.boolean(),
   order: z.number().int(),
   external: z.boolean(),
   newTab: z.boolean(),
 });
+
+export const navigationItemSchema = z.union([
+  navigationItemBaseSchema.extend({ url: safeUrlSchema(500) }),
+  navigationItemBaseSchema.extend({ pageId: z.string().min(1) }),
+]);
 
 export const navigationSettingsDataSchema = z.object({
   items: z.array(navigationItemSchema).max(100),
@@ -50,7 +58,7 @@ export const navigationSettingsDataSchema = z.object({
 // --- footer
 export const footerLinkSchema = z.object({
   label: z.string().min(1).max(100),
-  url: z.string().min(1).max(500),
+  url: safeUrlSchema(500),
 });
 
 export const footerSettingsDataSchema = z.object({

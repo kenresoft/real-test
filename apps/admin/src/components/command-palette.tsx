@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router';
-import { ClipboardList, FileText, Images, Inbox, LayoutDashboard, LayoutList, Puzzle, ScrollText, Settings, Users } from 'lucide-react';
+import { Blocks, ClipboardList, FileText, Images, Inbox, Layers, LayoutDashboard, LayoutList, LayoutTemplate, Puzzle, ScrollText, Settings, Users } from 'lucide-react';
 
 import { authClient } from '@/lib/auth-client';
 import { useContentTypes } from '@/lib/queries/content-types';
@@ -66,6 +66,18 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             <CommandItem value="Entries" onSelect={() => go('/entries')}>
               <FileText />
               Entries
+            </CommandItem>
+            <CommandItem value="Pages" onSelect={() => go('/pages')}>
+              <LayoutTemplate />
+              Pages
+            </CommandItem>
+            <CommandItem value="Templates" onSelect={() => go('/templates')}>
+              <Layers />
+              Templates
+            </CommandItem>
+            <CommandItem value="Reusable blocks" onSelect={() => go('/reusable-blocks')}>
+              <Blocks />
+              Reusable blocks
             </CommandItem>
             <CommandItem value="Media" onSelect={() => go('/media')}>
               <Images />

@@ -7,6 +7,8 @@ import { Hono } from 'hono';
 import { SELF, env } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { signUpVerifiedAndGetCookie } from './helpers/auth';
+
 // payments.ts's own logic (idempotent resolution, amount/currency validation, reference-ownership
 // checks, callbackUrl origin validation) is tested here against a hand-injected fake
 // PluginPaymentsService, bypassing SELF.fetch/the full apps/api Worker entirely — mirrors
@@ -35,6 +37,7 @@ function buildTestApp(payments: PluginPaymentsService, logger: PluginLogger = fa
       media: { get: async () => null, upload: async () => { throw new Error('unused'); }, delete: async () => false },
       config: { get: async () => ({}) },
       email: { send: async () => {} },
+      identity: { getUser: async () => null },
       payments,
       logger,
     };
@@ -46,14 +49,7 @@ function buildTestApp(payments: PluginPaymentsService, logger: PluginLogger = fa
 }
 
 async function freshAdminCookie(): Promise<string> {
-  const response = await SELF.fetch('https://example.com/api/v1/auth/sign-up/email', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: 'commerce-payments-admin@example.test', password: 'correct horse battery staple', name: 'Admin' }),
-  });
-  const setCookie = response.headers.get('set-cookie');
-  if (!setCookie) throw new Error('sign-up did not return a session cookie');
-  return setCookie.split(';')[0]!;
+  return signUpVerifiedAndGetCookie('commerce-payments-admin@example.test', { password: 'correct horse battery staple', name: 'Admin' });
 }
 
 async function createPublishedProduct(adminCookie: string) {
@@ -114,7 +110,6 @@ describe('commerce plugin: payments (real D1)', () => {
     await env.DB.exec('DELETE FROM plugin_commerce_orders');
     await env.DB.exec('DELETE FROM plugin_commerce_cart_items');
     await env.DB.exec('DELETE FROM plugin_commerce_carts');
-    await env.DB.exec('DELETE FROM plugin_commerce_customers');
     await env.DB.exec('DELETE FROM plugin_commerce_product_variants');
     await env.DB.exec('DELETE FROM plugin_commerce_products');
     await env.DB.exec('DELETE FROM plugin_commerce_idempotency_keys');

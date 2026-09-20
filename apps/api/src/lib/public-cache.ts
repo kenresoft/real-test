@@ -49,6 +49,14 @@ export async function invalidatePublicMediaCache(id: string): Promise<void> {
   await cache.delete(publicCacheKey(`/api/v1/public/media/${id}/file`));
 }
 
+// A media folder's public listing (routes/public/media.ts's GET .../media/folders/:slug) is
+// invalidated on rename/delete and whenever media moves in or out of it — cheap since it's one
+// key per folder, unlike the media file route's own per-item, effectively-permanent cache.
+export async function invalidatePublicMediaFolderCache(slug: string): Promise<void> {
+  const cache = caches.default;
+  await cache.delete(publicCacheKey(`/api/v1/public/media/folders/${slug}`));
+}
+
 // Global variables are a single list response (no per-key sub-resource), so there's exactly
 // one cache key to invalidate on any create/update/delete.
 export async function invalidatePublicGlobalVariablesCache(): Promise<void> {
@@ -56,9 +64,32 @@ export async function invalidatePublicGlobalVariablesCache(): Promise<void> {
   await cache.delete(publicCacheKey('/api/v1/public/global-variables'));
 }
 
-// One cache key per Structured Settings module (§6) — a write to one module never needs to
-// invalidate any other module's cached response.
-export async function invalidatePublicStructuredSettingsCache(module: string): Promise<void> {
+// Phase 2 of the schema-driven frontend work (docs/SITE_BUILDER.md) — like global variables,
+// this is a single list response with no per-item sub-resource, invalidated on any content
+// type create/update that could change its routePattern.
+export async function invalidatePublicRoutePatternsCache(): Promise<void> {
   const cache = caches.default;
-  await cache.delete(publicCacheKey(`/api/v1/public/settings/${module}`));
+  await cache.delete(publicCacheKey('/api/v1/public/route-patterns'));
+}
+
+// Phase 3 of the schema-driven frontend work (docs/SITE_BUILDER.md §8) — called from every Page
+// write route and the scheduled sweep, for the route's current value AND (on a rename) its
+// previous value, since either could otherwise keep serving a stale cached response. The
+// by-route key must match exactly what routes/public/pages.ts's cache middleware stores it
+// under (path + query string), not just the path.
+export async function invalidatePublicPageCache(route: string): Promise<void> {
+  const cache = caches.default;
+  await Promise.all([
+    cache.delete(publicCacheKey('/api/v1/public/pages')),
+    cache.delete(publicCacheKey(`/api/v1/public/pages/by-route?route=${encodeURIComponent(route)}`)),
+  ]);
+}
+
+// Phase 7 of the schema-driven frontend work (docs/SITE_BUILDER.md) — a reusable block has
+// exactly one public cache key (its own `GET /public/reusable-blocks/:id`), unlike Pages'
+// invalidateAllPageCaches() sweep, since rendering a `reusableBlockRef` only ever reads this
+// one resource directly, never joined into a page's own cached response.
+export async function invalidatePublicReusableBlockCache(id: string): Promise<void> {
+  const cache = caches.default;
+  await cache.delete(publicCacheKey(`/api/v1/public/reusable-blocks/${id}`));
 }

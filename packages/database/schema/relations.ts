@@ -3,7 +3,11 @@ import { relations } from 'drizzle-orm';
 import { contentTypes } from './content-types';
 import { fieldDefinitions } from './field-definitions';
 import { entries } from './entries';
+import { entryFolders } from './entry-folders';
 import { entryRevisions } from './entry-revisions';
+import { pages } from './pages';
+import { pageRevisions } from './page-revisions';
+import { templates } from './templates';
 import { forms } from './forms';
 import { formFields } from './form-fields';
 import { formSubmissions } from './form-submissions';
@@ -27,13 +31,35 @@ export const entriesRelations = relations(entries, ({ one, many }) => ({
     fields: [entries.contentTypeId],
     references: [contentTypes.id],
   }),
+  folder: one(entryFolders, { fields: [entries.folderId], references: [entryFolders.id] }),
   revisions: many(entryRevisions),
+}));
+
+export const entryFoldersRelations = relations(entryFolders, ({ one, many }) => ({
+  contentType: one(contentTypes, { fields: [entryFolders.contentTypeId], references: [contentTypes.id] }),
+  parent: one(entryFolders, { fields: [entryFolders.parentId], references: [entryFolders.id] }),
+  entries: many(entries),
 }));
 
 // No relation defined toward `user` here — auth.ts (generated) already owns the one
 // `relations(user, ...)` call for that table, and drizzle allows only one per table.
 export const entryRevisionsRelations = relations(entryRevisions, ({ one }) => ({
   entry: one(entries, { fields: [entryRevisions.entryId], references: [entries.id] }),
+}));
+
+export const pagesRelations = relations(pages, ({ one, many }) => ({
+  revisions: many(pageRevisions),
+  template: one(templates, { fields: [pages.templateId], references: [templates.id] }),
+}));
+
+// No relation defined toward `user` here — same reasoning as entryRevisionsRelations above.
+export const pageRevisionsRelations = relations(pageRevisions, ({ one }) => ({
+  page: one(pages, { fields: [pageRevisions.pageId], references: [pages.id] }),
+}));
+
+export const templatesRelations = relations(templates, ({ one, many }) => ({
+  contentType: one(contentTypes, { fields: [templates.contentTypeId], references: [contentTypes.id] }),
+  pages: many(pages),
 }));
 
 export const formsRelations = relations(forms, ({ many }) => ({

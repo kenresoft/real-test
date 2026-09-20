@@ -4,18 +4,20 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiError } from '@/lib/api-client';
 import { ContentTypeDetailPage } from '@/pages/ContentTypeDetailPage';
 
-const { getMock, postMock } = vi.hoisted(() => ({
+const { getMock, postMock, patchMock } = vi.hoisted(() => ({
   getMock: vi.fn(),
   postMock: vi.fn(),
+  patchMock: vi.fn(),
 }));
 
 vi.mock('@/lib/api-client', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
   return {
     ...actual,
-    apiClient: { ...actual.apiClient, get: getMock, post: postMock },
+    apiClient: { ...actual.apiClient, get: getMock, post: postMock, patch: patchMock },
   };
 });
 
@@ -29,9 +31,9 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={['/content-types/ct-1']}>
+      <MemoryRouter initialEntries={['/content-types/ct-1/schema']}>
         <Routes>
-          <Route path="/content-types/:contentTypeId" element={<ContentTypeDetailPage />} />
+          <Route path="/content-types/:contentTypeId/schema" element={<ContentTypeDetailPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -42,6 +44,7 @@ describe('ContentTypeDetailPage', () => {
   beforeEach(() => {
     getMock.mockReset();
     postMock.mockReset();
+    patchMock.mockReset();
   });
 
   it('fetches the content type and its fields scoped by contentTypeId', async () => {
@@ -56,10 +59,10 @@ describe('ContentTypeDetailPage', () => {
 
     renderPage();
 
-    await waitFor(() =>
-      expect(screen.getByRole('heading', { name: 'Blog Post' })).toBeInTheDocument(),
-    );
-    expect(screen.getByText('title')).toBeInTheDocument();
+    // The "Schema" heading is static, not data-dependent, so waiting on it alone would resolve
+    // before the fields have actually loaded — wait on the field data itself instead.
+    await waitFor(() => expect(screen.getByText('title')).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: 'Schema' })).toBeInTheDocument();
     expect(screen.getByText('Title')).toBeInTheDocument();
     expect(getMock).toHaveBeenCalledWith('/api/v1/admin/content-types/ct-1/fields');
     expect(getMock).toHaveBeenCalledWith('/api/v1/admin/content-types/ct-1');
@@ -139,6 +142,68 @@ describe('ContentTypeDetailPage', () => {
         required: false,
         config: { options: ['open', 'closed'] },
       }),
+    );
+  });
+
+  it('edits a content type, including its route pattern, through the edit dialog', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path.endsWith('/fields')) return Promise.resolve([]);
+      return Promise.resolve({ id: 'ct-1', name: 'Blog Post', slug: 'blog-post', routePattern: null });
+    });
+    patchMock.mockResolvedValue({
+      id: 'ct-1',
+      name: 'Blog Post',
+      slug: 'blog-post',
+      routePattern: '/blog/{slug}',
+    });
+
+    renderPage();
+    // Wait for the content type to actually load — the "Schema" heading is static and would
+    // resolve immediately, before the Edit button (which needs contentType data) exists.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = screen.getByRole('dialog');
+    // userEvent.type interprets a bare "{" as special-key syntax (closing "}" alone is
+    // literal), so a real "{slug}" is typed as "{{slug}" — see testing-library/user-event's
+    // own docs on escaping curly braces.
+    await userEvent.type(within(dialog).getByLabelText('Route pattern'), '/blog/{{slug}');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() =>
+      expect(patchMock).toHaveBeenCalledWith('/api/v1/admin/content-types/ct-1', {
+        name: 'Blog Post',
+        slug: 'blog-post',
+        description: null,
+        routePattern: '/blog/{slug}',
+      }),
+    );
+  });
+
+  it('surfaces the server-side collision error when saving a duplicate route pattern', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path.endsWith('/fields')) return Promise.resolve([]);
+      return Promise.resolve({ id: 'ct-1', name: 'Blog Post', slug: 'blog-post', routePattern: null });
+    });
+    patchMock.mockRejectedValue(
+      new ApiError(400, 'That route pattern is already used by another content type.'),
+    );
+
+    renderPage();
+    // Wait for the content type to actually load — the "Schema" heading is static and would
+    // resolve immediately, before the Edit button (which needs contentType data) exists.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = screen.getByRole('dialog');
+    // userEvent.type interprets a bare "{" as special-key syntax (closing "}" alone is
+    // literal), so a real "{slug}" is typed as "{{slug}" — see testing-library/user-event's
+    // own docs on escaping curly braces.
+    await userEvent.type(within(dialog).getByLabelText('Route pattern'), '/blog/{{slug}');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() =>
+      expect(screen.getByText('That route pattern is already used by another content type.')).toBeInTheDocument(),
     );
   });
 });

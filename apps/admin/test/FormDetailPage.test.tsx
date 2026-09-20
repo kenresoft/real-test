@@ -6,14 +6,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FormDetailPage } from '@/pages/FormDetailPage';
 
-const { getMock, postMock } = vi.hoisted(() => ({
+const { getMock, postMock, patchMock, uploadMock } = vi.hoisted(() => ({
   getMock: vi.fn(),
   postMock: vi.fn(),
+  patchMock: vi.fn(),
+  uploadMock: vi.fn(),
 }));
 
 vi.mock('@/lib/api-client', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api-client')>('@/lib/api-client');
-  return { ...actual, apiClient: { ...actual.apiClient, get: getMock, post: postMock } };
+  return {
+    ...actual,
+    apiClient: { ...actual.apiClient, get: getMock, post: postMock, patch: patchMock, upload: uploadMock },
+  };
 });
 
 vi.mock('@/lib/auth-client', () => ({
@@ -39,6 +44,8 @@ describe('FormDetailPage', () => {
   beforeEach(() => {
     getMock.mockReset();
     postMock.mockReset();
+    patchMock.mockReset();
+    uploadMock.mockReset();
   });
 
   it('fetches the form and its fields scoped by formId', async () => {
@@ -127,6 +134,49 @@ describe('FormDetailPage', () => {
         config: { options: ['sales', 'support'] },
       }),
     );
+  });
+
+  it('shows a "No notifications configured" badge, and sets notification emails through Edit form', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path.endsWith('/fields')) return Promise.resolve([]);
+      return Promise.resolve({ id: 'f-1', name: 'Contact', slug: 'contact', notificationEmails: null });
+    });
+    patchMock.mockResolvedValue({
+      id: 'f-1',
+      name: 'Contact',
+      slug: 'contact',
+      notificationEmails: ['hr@example.com', 'ops@example.com'],
+    });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('No notifications configured')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const dialog = screen.getByRole('dialog');
+    await userEvent.type(
+      within(dialog).getByLabelText('Notification emails'),
+      'hr@example.com, ops@example.com',
+    );
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() =>
+      expect(patchMock).toHaveBeenCalledWith('/api/v1/admin/forms/f-1', {
+        name: 'Contact',
+        slug: 'contact',
+        notificationEmails: ['hr@example.com', 'ops@example.com'],
+      }),
+    );
+  });
+
+  it('shows Preview & Test only once the form has at least one field', async () => {
+    getMock.mockImplementation((path: string) => {
+      if (path.endsWith('/fields')) return Promise.resolve([]);
+      return Promise.resolve({ id: 'f-1', name: 'Contact', slug: 'contact' });
+    });
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText('No fields yet')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Preview & Test' })).not.toBeInTheDocument();
   });
 
   it('links to the submissions page', async () => {

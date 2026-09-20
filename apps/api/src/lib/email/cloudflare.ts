@@ -16,11 +16,22 @@ export function createCloudflareEmailSender(env: Bindings): EmailSender {
         throw new Error('EMAIL_PROVIDER=cloudflare but EMAIL_FROM is not set');
       }
       await env.EMAIL.send({
-        from: env.EMAIL_FROM,
+        from: message.from ?? env.EMAIL_FROM,
         to: message.to,
         subject: message.subject,
         text: message.text,
         ...(message.html !== undefined ? { html: message.html } : {}),
+        ...(message.replyTo !== undefined ? { reply_to: message.replyTo } : {}),
+        ...(message.attachments?.length
+          ? {
+              attachments: message.attachments.map((a) => ({
+                disposition: 'attachment' as const,
+                filename: a.filename,
+                type: a.contentType,
+                content: a.content,
+              })),
+            }
+          : {}),
       });
     },
   };

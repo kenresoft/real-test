@@ -19,6 +19,11 @@ export const authOptions = {
   basePath: '/api/v1/auth',
   emailAndPassword: {
     enabled: true,
+    // Enforced at the authentication layer itself (better-auth's own sign-in handler), not
+    // just an Admin UI redirect — see apps/api/src/lib/auth.ts's `emailVerification` config
+    // for how the verification email is actually sent, and docs/ARCHITECTURE.md's Changelog
+    // for why the first/bootstrap owner gets no exception to this.
+    requireEmailVerification: true,
   },
   advanced: {
     defaultCookieAttributes: {
@@ -47,12 +52,17 @@ export const authOptions = {
   },
   user: {
     additionalFields: {
+      // 'none' (the default) = a normal website/application user with NO CMS access — e.g. a
+      // Commerce storefront customer signing up through this same better-auth instance. A CMS
+      // role is only ever granted by trusted server-side code (bootstrap owner, Add User, the
+      // role-change and ownership-transfer routes) — never by the client (input: false rejects
+      // it at sign-up AND update-user), and never as a side effect of merely creating an
+      // account. requireSession (middleware/require-session.ts) refuses any session whose role
+      // isn't a real CMS role on every /admin route.
       role: {
         type: 'string',
         required: true,
-        defaultValue: 'editor',
-        // Never client-settable at signup — only a trusted admin action may grant a role
-        // above 'editor'.
+        defaultValue: 'none',
         input: false,
       },
       // A disabled account is treated as unauthenticated (require-session.ts) even though its
@@ -73,6 +83,18 @@ export const authOptions = {
         required: true,
         defaultValue: false,
         input: false,
+      },
+      // Client-settable (unlike every other additionalField above) — a personal "which webmail
+      // app should Reply by email open" preference (packages/database/schema/auth.ts has the
+      // full rationale), never security-relevant, so there's no reason to route it through an
+      // admin-gated route the way role/disabled/developerToolsAccess are. Left unvalidated
+      // against a fixed enum here deliberately: an unrecognized value just falls back to a plain
+      // mailto: link client-side (apps/admin/src/lib/mail-compose-links.ts), so there's no
+      // failure mode worth a server-side rejection for.
+      preferredMailClient: {
+        type: 'string',
+        required: false,
+        input: true,
       },
     },
   },

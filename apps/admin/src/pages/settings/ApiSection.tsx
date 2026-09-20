@@ -67,14 +67,14 @@ function DeveloperExperienceSection({ settings, readOnly }: SectionProps) {
         <div className="flex flex-col gap-1">
           <Label htmlFor="settings-developer-mode">Developer Mode</Label>
           <p className="max-w-md text-sm text-muted-foreground">
-            Adds a "Developer" action to Content Types, Entries, Forms, and Media — endpoints,
+            Adds a "Developer" action to Content Types, Entries, Forms, and Media: endpoints,
             example requests/responses, and ready-to-copy Astro/TypeScript/JavaScript/React/
             Next.js/cURL snippets. Off by default so content managers see a purely
             content-focused CMS.
           </p>
           <p className="text-xs text-muted-foreground">
             Owner and Admin always see it once this is on. For Editor and Author, grant it per
-            person from the Users page — never to Viewer.
+            person from the Users page. Never to Viewer.
           </p>
         </div>
         <Switch
@@ -100,7 +100,7 @@ function EmailDeliverySection() {
   return (
     <SettingsSection
       title="Email delivery"
-      description="Whether this deployment can actually send password-reset emails."
+      description="Whether this deployment can actually send password-reset and account-verification emails."
     >
       <div className="flex items-center justify-between gap-4">
         {isPending ? (
@@ -112,8 +112,8 @@ function EmailDeliverySection() {
           <>
             <p className="max-w-md text-sm text-muted-foreground">
               {status?.emailConfigured
-                ? 'A real email provider is configured — password-reset requests deliver normally.'
-                : "No EMAIL_PROVIDER is set for this deployment. Password-reset requests still succeed, but no email is actually sent — set EMAIL_PROVIDER in wrangler.toml (see docs/DEPLOYMENT.md) to enable delivery."}
+                ? 'A real email provider is fully configured. Password-reset and account-verification emails deliver normally.'
+                : "Email isn't fully configured for this deployment (EMAIL_PROVIDER, and its required RESEND_API_KEY/EMAIL_FROM or EMAIL binding, must all be set). Password-reset requests and new sign-ups still succeed, but no email is sent. Set EMAIL_PROVIDER in wrangler.toml (see docs/DEPLOYMENT.md) to enable delivery."}
             </p>
             <Badge
               variant="outline"
@@ -128,6 +128,121 @@ function EmailDeliverySection() {
           </>
         )}
       </div>
+    </SettingsSection>
+  );
+}
+
+// Read-only, same shape as EmailDeliverySection above. In practice this will only ever render
+// "Configured" — createAuth() now refuses to start at all when BETTER_AUTH_SECRET is missing or
+// still equal to better-auth's own known default (apps/api/src/lib/auth.ts), and reaching this
+// signed-in page requires a working session, which requires that same check to have passed. It
+// stays here anyway as an explicit, checkable confirmation, and because GET /system/status
+// itself is unauthenticated and reachable even when every session-touching route is down.
+function AuthSecuritySection() {
+  const { data: status, isPending } = useSystemStatus();
+
+  return (
+    <SettingsSection
+      title="Auth secret"
+      description="Whether this deployment's session-signing secret is a real, randomly generated value."
+    >
+      <div className="flex items-center justify-between gap-4">
+        {isPending ? (
+          <>
+            <Skeleton className="h-4 w-72" />
+            <Skeleton className="h-5 w-24 shrink-0 rounded-full" />
+          </>
+        ) : (
+          <>
+            <p className="max-w-md text-sm text-muted-foreground">
+              {status?.authSecretConfigured
+                ? 'BETTER_AUTH_SECRET is set to a real value. Sessions are signed with a secret only this deployment knows.'
+                : "BETTER_AUTH_SECRET isn't set, which is why you can't be viewing this. Every session request is refused in this state. Set it with `wrangler secret put BETTER_AUTH_SECRET` (see docs/DEPLOYMENT.md)."}
+            </p>
+            <Badge
+              variant="outline"
+              className={
+                status?.authSecretConfigured
+                  ? 'shrink-0 border-success/30 bg-success/10 text-success'
+                  : 'shrink-0 border-destructive/30 bg-destructive/10 text-destructive'
+              }
+            >
+              {status?.authSecretConfigured ? 'Configured' : 'Not configured'}
+            </Badge>
+          </>
+        )}
+      </div>
+    </SettingsSection>
+  );
+}
+
+// Off by default. Raw HTML blocks let an admin paste HTML into a page; the server sanitizes it on
+// every save and every public read (apps/api/src/lib/raw-html-guard.ts), only admins/owners may add
+// or change one, and switching this off hides every existing raw block on the public site at once.
+function RawHtmlBlocksSection({ settings, readOnly }: SectionProps) {
+  const updateSettings = useUpdateSettings();
+  const initial = settings?.featureFlags?.rawHtmlBlocks === true;
+  const [enabled, setEnabled] = useState(initial);
+  const [saved, setSaved] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+
+  const dirty = enabled !== saved;
+
+  async function handleSave() {
+    setError(null);
+    try {
+      await updateSettings.mutateAsync({
+        ...toSettingsInput(settings),
+        featureFlags: { ...(settings?.featureFlags ?? {}), rawHtmlBlocks: enabled },
+      });
+      setSaved(enabled);
+      toast.success('Settings saved');
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Failed to save settings';
+      setError(message);
+      toast.error(message);
+    }
+  }
+
+  return (
+    <SettingsSection
+      title="Raw HTML blocks"
+      description="Let admins paste HTML into a page with the Raw HTML block."
+      footer={
+        <SettingsSaveBar
+          dirty={dirty}
+          pending={updateSettings.isPending}
+          readOnly={readOnly}
+          onSave={() => void handleSave()}
+          onDiscard={() => {
+            setEnabled(saved);
+            setError(null);
+          }}
+        />
+      }
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="settings-raw-html-blocks">Enable Raw HTML blocks</Label>
+          <p className="max-w-md text-sm text-muted-foreground">
+            Off by default. Pasted HTML is cleaned on the server before it is saved and again before
+            it is published: scripts, iframes, forms, event handlers, unsafe links and positioning
+            styles are always removed. Only admins and owners can add or change these blocks, and
+            every change is recorded in the audit log.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Turning this off hides every existing Raw HTML block on your public site immediately.
+          </p>
+        </div>
+        <Switch
+          id="settings-raw-html-blocks"
+          checked={enabled}
+          disabled={readOnly}
+          onCheckedChange={setEnabled}
+        />
+      </div>
+
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
     </SettingsSection>
   );
 }
@@ -181,7 +296,7 @@ function AuditLoggingSection({ settings, readOnly }: SectionProps) {
         <div className="flex flex-col gap-1">
           <Label htmlFor="settings-audit-logging">Audit logging</Label>
           <p className="max-w-md text-sm text-muted-foreground">
-            The audit log has no automatic pruning — every recorded event stays in the database
+            The audit log has no automatic pruning. Every recorded event stays in the database
             forever, which is exactly what you want for accountability, but does mean it grows
             without bound over time. Turning this off stops new events from being recorded; it
             doesn't delete what's already there.
@@ -208,22 +323,35 @@ function LivePreviewSection({ settings, readOnly }: SectionProps) {
 
   const [previewUrl, setPreviewUrl] = useState(settings?.previewUrl ?? '');
   const [savedPreviewUrl, setSavedPreviewUrl] = useState(settings?.previewUrl ?? '');
+  const [pagePreviewUrl, setPagePreviewUrl] = useState(settings?.pagePreviewUrl ?? '');
+  const [savedPagePreviewUrl, setSavedPagePreviewUrl] = useState(settings?.pagePreviewUrl ?? '');
   const [error, setError] = useState<string | null>(null);
 
-  const dirty = previewUrl !== savedPreviewUrl;
+  const dirty = previewUrl !== savedPreviewUrl || pagePreviewUrl !== savedPagePreviewUrl;
 
   async function handleSave() {
     setError(null);
-    const trimmed = previewUrl.trim();
-    if (trimmed && !trimmed.includes('{slug}')) {
-      setError('The template must include a {slug} placeholder');
+    const trimmedEntry = previewUrl.trim();
+    if (trimmedEntry && !trimmedEntry.includes('{slug}')) {
+      setError('The entry template must include a {slug} placeholder');
+      return;
+    }
+    const trimmedPage = pagePreviewUrl.trim();
+    if (trimmedPage && !trimmedPage.includes('{route}')) {
+      setError('The page template must include a {route} placeholder');
       return;
     }
 
     try {
-      await updateSettings.mutateAsync({ ...toSettingsInput(settings), previewUrl: trimmed || null });
-      setPreviewUrl(trimmed);
-      setSavedPreviewUrl(trimmed);
+      await updateSettings.mutateAsync({
+        ...toSettingsInput(settings),
+        previewUrl: trimmedEntry || null,
+        pagePreviewUrl: trimmedPage || null,
+      });
+      setPreviewUrl(trimmedEntry);
+      setSavedPreviewUrl(trimmedEntry);
+      setPagePreviewUrl(trimmedPage);
+      setSavedPagePreviewUrl(trimmedPage);
       toast.success('Settings saved');
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Failed to save settings';
@@ -235,7 +363,7 @@ function LivePreviewSection({ settings, readOnly }: SectionProps) {
   return (
     <SettingsSection
       title="Live Preview"
-      description="The URL template your frontend uses to render one entry, so the Entry Editor's Preview button can open it."
+      description="The URL templates your frontend uses to render one entry or page, so the editor's Preview button can open them."
       footer={
         <SettingsSaveBar
           dirty={dirty}
@@ -244,6 +372,7 @@ function LivePreviewSection({ settings, readOnly }: SectionProps) {
           onSave={() => void handleSave()}
           onDiscard={() => {
             setPreviewUrl(savedPreviewUrl);
+            setPagePreviewUrl(savedPagePreviewUrl);
             setError(null);
           }}
         />
@@ -254,15 +383,15 @@ function LivePreviewSection({ settings, readOnly }: SectionProps) {
         <p className="mt-1">
           Live Preview lets you view a draft (or any unpublished change) exactly as it'll look on
           your real site, before you publish it. It needs your frontend to have a page for
-          rendering one entry, and for that page to check for a <code className="rounded bg-muted px-1 py-0.5 text-xs">preview_token</code>{' '}
-          link parameter — when present, it fetches the entry through the preview endpoint
+          rendering one entry (or Page), and for that page to check for a <code className="rounded bg-muted px-1 py-0.5 text-xs">preview_token</code>{' '}
+          link parameter. When present, it fetches the entry/page through the preview endpoint
           instead of the normal public one, which is the only way this works for a draft that
-          isn't published yet. Below, tell us the URL pattern that page uses on your site.
+          isn't published yet. Below, tell us the URL pattern each one uses on your site.
         </p>
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label htmlFor="settings-preview-url">Preview URL template</Label>
+        <Label htmlFor="settings-preview-url">Entry preview URL template</Label>
         <Input
           id="settings-preview-url"
           placeholder="http://localhost:4321/{contentType}/{slug}"
@@ -273,11 +402,29 @@ function LivePreviewSection({ settings, readOnly }: SectionProps) {
         <p className="text-sm text-muted-foreground">
           <code className="rounded bg-muted px-1 py-0.5 text-xs">{'{contentType}'}</code> and{' '}
           <code className="rounded bg-muted px-1 py-0.5 text-xs">{'{slug}'}</code> are replaced with the
-          entry's own values — for <code className="rounded bg-muted px-1 py-0.5 text-xs">examples/astro-site</code>{' '}
+          entry's own values. For <code className="rounded bg-muted px-1 py-0.5 text-xs">examples/astro-site</code>{' '}
           running locally, that's <code className="rounded bg-muted px-1 py-0.5 text-xs">http://localhost:4321/blog/{'{slug}'}</code>{' '}
           (this example only reads <code className="rounded bg-muted px-1 py-0.5 text-xs">{'{slug}'}</code>, since it
           has one content type hardcoded to the <code className="rounded bg-muted px-1 py-0.5 text-xs">/blog</code>{' '}
           path).
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="settings-page-preview-url">Page preview URL template</Label>
+        <Input
+          id="settings-page-preview-url"
+          placeholder="http://localhost:4321{route}"
+          disabled={readOnly}
+          value={pagePreviewUrl}
+          onChange={(event) => setPagePreviewUrl(event.target.value)}
+        />
+        <p className="text-sm text-muted-foreground">
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">{'{route}'}</code> is replaced with
+          the Page's own <code className="rounded bg-muted px-1 py-0.5 text-xs">route</code> (e.g.{' '}
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">/about</code>). This only takes effect
+          once your frontend actually renders Pages. That is not yet true for{' '}
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">examples/astro-site</code>.
         </p>
       </div>
 
@@ -287,72 +434,8 @@ function LivePreviewSection({ settings, readOnly }: SectionProps) {
 }
 
 export function ApiSection({ settings, readOnly }: SectionProps) {
-  const updateSettings = useUpdateSettings();
-
-  const [corsOrigin, setCorsOrigin] = useState(settings?.corsOrigin ?? '');
-  const [savedCorsOrigin, setSavedCorsOrigin] = useState(settings?.corsOrigin ?? '');
-  const [error, setError] = useState<string | null>(null);
-
-  const dirty = corsOrigin !== savedCorsOrigin;
-
-  async function handleSave() {
-    setError(null);
-    const trimmed = corsOrigin.trim();
-    if (trimmed && !/^https?:\/\/.+/i.test(trimmed)) {
-      setError('CORS origin must be a full URL starting with http:// or https://');
-      return;
-    }
-
-    try {
-      await updateSettings.mutateAsync({ ...toSettingsInput(settings), corsOrigin: trimmed || null });
-      setCorsOrigin(trimmed);
-      setSavedCorsOrigin(trimmed);
-      toast.success('Settings saved');
-    } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'Failed to save settings';
-      setError(message);
-      toast.error(message);
-    }
-  }
-
-  function handleDiscard() {
-    setCorsOrigin(savedCorsOrigin);
-    setError(null);
-  }
-
   return (
     <div className="flex flex-col gap-6">
-      <SettingsSection
-        title="API access"
-        description="Controls how external origins are allowed to call this deployment's API."
-        footer={
-          <SettingsSaveBar
-            dirty={dirty}
-            pending={updateSettings.isPending}
-            readOnly={readOnly}
-            onSave={() => void handleSave()}
-            onDiscard={handleDiscard}
-          />
-        }
-      >
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="settings-cors-origin">CORS origin</Label>
-          <Input
-            id="settings-cors-origin"
-            placeholder="https://cms.example.com"
-            disabled={readOnly}
-            value={corsOrigin}
-            onChange={(event) => setCorsOrigin(event.target.value)}
-          />
-          <p className="text-sm text-muted-foreground">
-            Informational reference only — the actual allow-list is configured via the
-            CORS_ORIGINS environment binding (§9).
-          </p>
-        </div>
-
-        {error ? <p className="text-sm text-destructive">{error}</p> : null}
-      </SettingsSection>
-
       <SettingsSection title="API reference" description="Live documentation for this deployment's REST API.">
         <div className="flex flex-col gap-3">
           <a
@@ -378,11 +461,15 @@ export function ApiSection({ settings, readOnly }: SectionProps) {
 
       <EmailDeliverySection />
 
+      <AuthSecuritySection />
+
       <LivePreviewSection settings={settings} readOnly={readOnly} />
 
       {/* The two most delicate, "don't toggle casually" controls in this section go last,
           deliberately de-prioritized below the more expected/benign API settings above. */}
       <AuditLoggingSection settings={settings} readOnly={readOnly} />
+
+      <RawHtmlBlocksSection settings={settings} readOnly={readOnly} />
 
       <DeveloperExperienceSection settings={settings} readOnly={readOnly} />
     </div>

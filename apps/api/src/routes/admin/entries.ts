@@ -14,7 +14,10 @@ import type { Entry, EntryRevision, EntryStatus, EntryWithContentType } from '@k
 import { z } from 'zod';
 
 import { recordAudit } from '../../lib/audit';
+import { enqueueCachePurgePaths, processCachePurgeJobBatch } from '../../lib/cache-purge';
 import { getDb } from '../../lib/db';
+import { loadRichTextFields, sanitizeEntryData } from '../../lib/entry-html';
+import type { RichTextFieldMap } from '../../lib/entry-html';
 import { invalidatePublicEntryCache } from '../../lib/public-cache';
 import { signPreviewToken } from '../../lib/preview-token';
 import { dispatchWebhookEvent } from '../../lib/webhooks';
@@ -51,32 +54,40 @@ function canWriteEntry(role: string, entry: Pick<DbEntry, 'createdBy'>, userId: 
 // contentTypeId is optional: present -> entries for that one content type (unchanged
 // behavior); absent -> every entry across every content type, joined with its content type
 // and author (§ unified admin Entries view).
-const listQuerySchema = z.object({ contentTypeId: z.string().min(1).optional() });
+const listQuerySchema = z.object({
+  contentTypeId: z.string().min(1).optional(),
+  // Mirrors Media's own list-query convention: omitted = every folder, 'unfiled' = root only,
+  // any other string = entries in that one folder.
+  folderId: z.string().min(1).optional(),
+});
 const createEntryQuerySchema = z.object({ contentTypeId: z.string().min(1) });
 const contentTypeScopedQuerySchema = z.object({ contentTypeId: z.string().min(1) });
 const idParamSchema = z.object({ id: z.string().min(1) });
 const revisionParamsSchema = z.object({ id: z.string().min(1), revisionId: z.string().min(1) });
 
-function toEntry(row: DbEntry): Entry {
+// `richText`, when given, re-sanitises rich_text fields on the way out (the admin Preview renders
+// them as HTML, and older stored values predate write-time sanitising).
+function toEntry(row: DbEntry, richText?: RichTextFieldMap): Entry {
   return {
     id: row.id,
     contentTypeId: row.contentTypeId,
     slug: row.slug,
     status: row.status as EntryStatus,
-    data: row.data,
+    data: richText ? sanitizeEntryData(richText, row.contentTypeId, row.data) : row.data,
     publishAt: row.publishAt ? row.publishAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
 }
 
-function toEntryWithContentType(row: DbEntryWithContentType): EntryWithContentType {
+function toEntryWithContentType(row: DbEntryWithContentType, richText: RichTextFieldMap): EntryWithContentType {
   return {
-    ...toEntry(row),
+    ...toEntry(row, richText),
     contentTypeName: row.contentTypeName,
     contentTypeSlug: row.contentTypeSlug,
     authorName: row.authorName,
     authorEmail: row.authorEmail,
+    folderId: row.folderId,
   };
 }
 
@@ -145,10 +156,12 @@ entriesRoute.openapi(
     },
   }),
   async (c) => {
-    const { contentTypeId } = c.req.valid('query');
+    const { contentTypeId, folderId } = c.req.valid('query');
     const db = getDb(c);
-    const rows = await listEntriesWithContentType(db, contentTypeId);
-    return c.json(rows.map(toEntryWithContentType), 200);
+    const scope = folderId === undefined ? undefined : folderId === 'unfiled' ? null : folderId;
+    const rows = await listEntriesWithContentType(db, contentTypeId, scope);
+    const richText = await loadRichTextFields(db);
+    return c.json(rows.map((row) => toEntryWithContentType(row, richText)), 200);
   },
 );
 
@@ -290,6 +303,12 @@ entriesRoute.openapi(
     let created = 0;
     let updated = 0;
     const errors: { slug: string; error: string }[] = [];
+    // Collected instead of invalidated per-item (as every single-entry write route above does)
+    // — an import file's size is caller-controlled and unbounded, so looping a cache invalidation
+    // call per row here could exceed a Worker invocation's subrequest budget the same way the
+    // manual "Purge Cache" button used to (see lib/cache-purge.ts). Every imported row shares this
+    // one content type, so there's exactly one list-cache path regardless of how many rows import.
+    const purgePaths = new Set<string>();
 
     for (const item of input.entries) {
       try {
@@ -302,7 +321,8 @@ entriesRoute.openapi(
 
         if (existing) updated++;
         else created++;
-        c.executionCtx.waitUntil(invalidateCacheForEntry(db, entry));
+        purgePaths.add(`/api/v1/public/${contentType.slug}`);
+        purgePaths.add(`/api/v1/public/${contentType.slug}/${entry.slug}`);
         dispatchWebhookEvent(
           db,
           c.executionCtx,
@@ -314,6 +334,11 @@ entriesRoute.openapi(
       } catch (err) {
         errors.push({ slug: item.slug, error: err instanceof Error ? err.message : 'Unknown error' });
       }
+    }
+
+    if (purgePaths.size > 0) {
+      const job = await enqueueCachePurgePaths(db, Array.from(purgePaths));
+      c.executionCtx.waitUntil(processCachePurgeJobBatch(db, job));
     }
 
     return c.json({ created, updated, errors }, 200);
@@ -345,7 +370,7 @@ entriesRoute.openapi(
     if (!entry) {
       return c.json({ error: 'Entry not found' }, 404);
     }
-    return c.json(toEntry(entry), 200);
+    return c.json(toEntry(entry, await loadRichTextFields(db)), 200);
   },
 );
 
